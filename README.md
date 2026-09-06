@@ -174,7 +174,7 @@ The MCP surface currently exposes **20 tools**. Intermediate transcripts remain 
 
 The same flow contract can be delivered through six coding-agent hosts:
 
-- **Pi** — native extension, `/tf` commands, live run views, and interactive approvals.
+- **Pi** — native extension, `/tf` commands, live run views, interactive approvals, and a live inspector (`Ctrl+Alt+T`) that reaches a run mid-flight to read a phase's recent activity or steer its subagent.
 - **Codex** — plugin and stdio MCP server.
 - **Claude Code** — plugin and stdio MCP server.
 - **OpenCode** — MCP configuration and generated skill.

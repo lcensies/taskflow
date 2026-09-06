@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { renderProgress, summarizeRun } from "../src/render.ts";
+import { renderProgress, renderRunningActivity, summarizeRun } from "../src/render.ts";
 import { emptyUsage } from "taskflow-core";
 import type { Taskflow } from "taskflow-core";
 import type { PhaseState, RunState } from "taskflow-core";
@@ -177,4 +177,27 @@ test("renderProgress: never shows negative elapsed for a running phase with stal
 	};
 	const out = renderProgress(mkState(def, { p: ps }), theme);
 	assert.ok(!/-\d+s/.test(out), `output must not contain a negative elapsed time:\n${out}`);
+});
+
+test("renderRunningActivity: only running phases, most recent lines, empty when idle", () => {
+	const def: Taskflow = {
+		name: "x",
+		phases: [
+			{ id: "a", type: "agent", task: "t" },
+			{ id: "b", type: "agent", task: "t", final: true },
+		],
+	};
+	const state = mkState(def, {
+		a: { id: "a", status: "running", liveLog: ["one", "two", "three"] },
+		b: { id: "b", status: "done", liveLog: ["finished work"], usage: emptyUsage() },
+	});
+	const out = renderRunningActivity(state, theme, 2);
+	assert.match(out, /Activity/);
+	assert.match(out, /two/);
+	assert.match(out, /three/);
+	assert.doesNotMatch(out, /one\b/, "older lines beyond the per-phase cap are dropped");
+	assert.doesNotMatch(out, /finished work/, "a finished phase is not live activity");
+
+	const idle = mkState(def, { a: done("a"), b: done("b") }, "completed");
+	assert.equal(renderRunningActivity(idle, theme), "", "nothing running → no activity block");
 });

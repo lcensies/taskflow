@@ -5,7 +5,7 @@
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
-import { renderProgress, summarizeRun } from "./render.ts";
+import { renderProgress, renderRunningActivity, summarizeRun } from "./render.ts";
 import type { RunState } from "taskflow-core";
 
 export interface RunHistoryResult {
@@ -163,6 +163,11 @@ export class RunHistoryComponent {
 			lines.push(truncateToWidth(`  ${th.fg("accent", "Run ")}${th.fg("muted", run.runId)}`, width));
 			lines.push("");
 			for (const l of renderProgress(run, th).split("\n")) lines.push(truncateToWidth(l, width));
+			const activity = renderRunningActivity(run, th);
+			if (activity) {
+				lines.push("");
+				for (const l of activity.split("\n")) lines.push(truncateToWidth(l, width));
+			}
 			lines.push("");
 			const hint = isResumable(run) ? "Esc back · r resume" : "Esc back";
 			const liveTag = this.timer && run.status === "running" ? th.fg("success", " ● live") : "";

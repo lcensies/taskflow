@@ -789,6 +789,18 @@ A run moves through: **running →** `completed` (a `final` phase produced outpu
   `--limit <chars>` (default 4000, max 32000). Read-only, human-invoked: the
   context-isolation contract still holds — peek is the debugging escape hatch
   when one phase of many produced garbage.
+- **Inspect a run WHILE it runs.** `Ctrl+Alt+T` (configurable:
+  `taskflow.inspectorShortcut`) opens the live inspector over the in-flight run —
+  phase list, then Enter for one phase's recent activity, partial output, model,
+  usage, and attempts. A shortcut is the only surface that works here: slash
+  input is queued while the taskflow tool holds the turn. With no run in flight
+  it opens the stored run history.
+- **Steer a running subagent.** In the inspector, `s` sends a message to the
+  selected phase (every fan-out item of a map/parallel phase gets it). It is
+  delivered after the subagent's current tool calls, before its next model
+  call — a redirect, not an interrupt. A message sent to a phase that has not
+  started is folded into that phase's task. A steered phase is never reused from
+  the cross-run cache. Turn it off with `taskflow.steering: false`.
 
 ## User commands
 
