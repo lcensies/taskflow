@@ -37,6 +37,7 @@ export {
 	workspaceReconcileAllowedFromEnv,
 } from "./resources/execution.ts";
 export * from "./context-store.ts";
+export * from "./steer.ts";
 export * from "./compile.ts";
 // NOTE: detached-runner.ts is intentionally NOT re-exported — it is a spawn-only
 // entry point with top-level argv parsing + process.exit. Importing it via the

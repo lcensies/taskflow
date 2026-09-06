@@ -14,7 +14,7 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { resolve as resolvePath } from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { type KeyId, Text } from "@earendil-works/pi-tui";
 import {
 	RECOMMENDED_DEFAULTS,
 	readSettings,
@@ -30,6 +30,10 @@ import { type AgentScope, discoverAgents, readSubagentSettings, shouldSyncBuilti
 import { renderRunResult, summarizeRun } from "./render.ts";
 import { createPiSubagentRunner, PI_TASKFLOW_PI_ENTRY_ENV, resolveParentPiCliEntry, runnerModulePath } from "./runner.ts";
 import { RunHistoryComponent, type RunHistoryResult } from "./runs-view.ts";
+import { InspectorComponent, type InspectorResult } from "./inspector-view.ts";
+import { clearActiveRun, getActiveRun, setActiveRun } from "./active-run.ts";
+import { appendSteerMessage, steerDirFor, steerFileFor } from "taskflow-core";
+import { startSteerWatcher } from "./steer-watch.ts";
 import { ApprovalViewComponent, type ApprovalChoice } from "./approval-view.ts";
 import {
 	executeTaskflow,
@@ -481,6 +485,10 @@ async function runFlow(
 	flowSourceDirIdentity?: DirectoryIdentity,
 ): Promise<RuntimeResult> {
 	const state = existing ?? makeRunState(def, args, ctx.cwd, flowSourceFile, flowSourceDirIdentity);
+	// Publish the live state so the inspector shortcut can read it while this
+	// tool call blocks the turn (slash commands are queued during a turn, so a
+	// shortcut + overlay is the only surface that can reach a run in flight).
+	setActiveRun(state, ctx.cwd);
 
 	const emit = (s: RunState, finalOutput?: string) => {
 		onUpdate?.({
@@ -596,8 +604,22 @@ async function runFlow(
 			}
 		}
 
+		// Steering channel: opened only for an interactive host (nobody can type
+		// into a headless run) and only when enabled. Fail-open — an unwritable
+		// runs dir degrades to "no steering", never to a failed run.
+		let steerDir: string | undefined;
+		if (ctx.hasUI && settings.taskflow.steering) {
+			try {
+				steerDir = steerDirFor(runsDir(ctx.cwd), state.runId);
+				setActiveRun(state, ctx.cwd, steerDir);
+			} catch {
+				steerDir = undefined;
+			}
+		}
+
 		const result = await executeTaskflow(state, {
 			cwd: ctx.cwd,
+			steerDir,
 			cwdBridgeMode: cwdBridgeModeFromEnv(),
 			agents,
 			globalThinking: settings.globalThinking,
@@ -636,8 +658,99 @@ async function runFlow(
 		return result;
 	} finally {
 		if (heartbeat) clearInterval(heartbeat);
+		clearActiveRun(state);
 		saveRun(state, cleanupConfig); // force-persist terminal state
 		emit(state); // final render reflecting terminal state
+	}
+}
+
+/** Minimal host context both the `/tf runs` command and the inspector shortcut
+ *  satisfy (they receive different context types from pi). */
+type ViewCtx = Pick<ExtensionContext, "cwd" | "hasUI" | "ui" | "isIdle">;
+
+/** Stored-run history panel — the `/tf runs` view, and the inspector's fallback
+ *  when no run is in flight. */
+async function openRunHistory(pi: ExtensionAPI, ctx: ViewCtx): Promise<void> {
+	const runs = listRuns(ctx.cwd, 50);
+	if (runs.length === 0) {
+		ctx.ui.notify("No taskflow runs yet.", "info");
+		return;
+	}
+	if (!ctx.hasUI) {
+		ctx.ui.notify(
+			runs.map((r) => `${r.runId} [${r.status}] ${r.flowName} — ${summarizeRun(r)}`).join("\n"),
+			"info",
+		);
+		return;
+	}
+	const result = await ctx.ui.custom<RunHistoryResult | undefined>((tui, theme, _kb, done) =>
+		new RunHistoryComponent(runs, theme, (r) => done(r), {
+			refresh: () => listRuns(ctx.cwd, 50),
+			requestRender: () => tui.requestRender(),
+			intervalMs: 1000,
+		}),
+	);
+	if (result?.action === "resume") {
+		if (ctx.isIdle()) {
+			pi.sendUserMessage(
+				`Resume the taskflow run "${result.runId}" using the taskflow tool with action="resume", runId="${result.runId}".`,
+			);
+		} else {
+			ctx.ui.notify("Agent is busy; try /tf resume when idle.", "warning");
+		}
+	}
+}
+
+/** Steer targets for a phase: the phase's own node, plus every fan-out item
+ *  node when the phase is a map/parallel (each item is its own subagent). */
+export function steerNodeIds(state: RunState, phaseId: string): string[] {
+	const total = state.phases[phaseId]?.subProgress?.total ?? 0;
+	const ids = [phaseId];
+	for (let i = 0; i < total; i++) ids.push(`${phaseId}-${i}`);
+	return ids;
+}
+
+/** The live inspector (default `ctrl+alt+t`). Falls back to stored runs. */
+async function openInspector(pi: ExtensionAPI, ctx: ViewCtx): Promise<void> {
+	const active = getActiveRun();
+	if (!active) {
+		await openRunHistory(pi, ctx);
+		return;
+	}
+	if (!ctx.hasUI) {
+		ctx.ui.notify(summarizeRun(active.state), "info");
+		return;
+	}
+	// Loop: steering closes the overlay to collect text, then reopens it.
+	for (;;) {
+		const result = await ctx.ui.custom<InspectorResult | undefined>((tui, theme, _kb, done) =>
+			new InspectorComponent(
+				active.state,
+				theme,
+				(r) => done(r),
+				Boolean(active.steerDir),
+				() => tui.requestRender(),
+			),
+		);
+		if (result?.action !== "steer" || !active.steerDir) return;
+		const text = await ctx.ui.input(`Steer ${result.phaseId}`, "message for the subagent…");
+		if (!text?.trim()) continue;
+		let delivered = false;
+		for (const nodeId of steerNodeIds(active.state, result.phaseId)) {
+			try {
+				if (appendSteerMessage(steerFileFor(active.steerDir, nodeId), text)) delivered = true;
+			} catch {
+				/* unwritable node file: try the remaining ones */
+			}
+		}
+		const ps = active.state.phases[result.phaseId];
+		if (delivered && ps) ps.steered = true;
+		ctx.ui.notify(
+			delivered
+				? `Queued for ${result.phaseId} — delivered after the subagent's current tool calls.`
+				: `Could not queue a message for ${result.phaseId}.`,
+			delivered ? "info" : "error",
+		);
 	}
 }
 
@@ -652,8 +765,20 @@ export default function (pi: ExtensionAPI) {
 	// the host: register `taskflow` + `/tf` exactly as before (zero change).
 	const ctxDir = process.env.PI_TASKFLOW_CTX_DIR;
 	const nodeId = process.env.PI_TASKFLOW_NODE_ID;
-	if (ctxDir && nodeId) {
-		registerCtxTools(pi, ctxDir, nodeId);
+	const steerFile = process.env.PI_TASKFLOW_STEER_FILE;
+	if (nodeId && (ctxDir || steerFile)) {
+		if (ctxDir) registerCtxTools(pi, ctxDir, nodeId);
+		if (steerFile) {
+			// Deliver as a steer: pi queues it and hands it to the model after the
+			// current assistant turn's tool calls, before the next model call.
+			// Unref'd timer + non-persistent watcher: nothing to dispose, the child
+			// process exits when its run ends.
+			startSteerWatcher({
+				file: steerFile,
+				offset: Number(process.env.PI_TASKFLOW_STEER_OFFSET ?? 0) || 0,
+				deliver: (text) => pi.sendUserMessage(text, { deliverAs: "steer" }),
+			});
+		}
 		return;
 	}
 
@@ -680,6 +805,21 @@ export default function (pi: ExtensionAPI) {
 			});
 		}
 	};
+
+	// The live inspector. A shortcut is the only input path that survives a
+	// blocking tool call (slash input is queued while the turn runs).
+	try {
+		// The setting is user text; pi validates the shape at registration time.
+		pi.registerShortcut(readSubagentSettings().taskflow.inspectorShortcut as KeyId, {
+			description: "Taskflow: inspect (and steer) the running flow",
+			handler: async (ctx) => {
+				await openInspector(pi, ctx as ViewCtx);
+			},
+		});
+	} catch (error) {
+		// A malformed/conflicting shortcut must not stop the extension loading.
+		console.warn(`[taskflow] inspector shortcut not registered: ${error instanceof Error ? error.message : String(error)}`);
+	}
 
 	pi.on("session_start", async (_e, ctx) => {
 		registerSavedFlowCommands(ctx);
@@ -2113,35 +2253,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (sub === "runs") {
-				const runs = listRuns(ctx.cwd, 50);
-				if (runs.length === 0) {
-					ctx.ui.notify("No taskflow runs yet.", "info");
-					return;
-				}
-				if (!ctx.hasUI) {
-					ctx.ui.notify(
-						runs.map((r) => `${r.runId} [${r.status}] ${r.flowName} — ${summarizeRun(r)}`).join("\n"),
-						"info",
-					);
-					return;
-				}
-				const result = await ctx.ui.custom<RunHistoryResult | undefined>((tui, theme, _kb, done) => {
-					const comp = new RunHistoryComponent(runs, theme, (r) => done(r), {
-						refresh: () => listRuns(ctx.cwd, 50),
-						requestRender: () => tui.requestRender(),
-						intervalMs: 1000,
-					});
-					return comp;
-				});
-				if (result?.action === "resume") {
-					if (ctx.isIdle()) {
-						pi.sendUserMessage(
-							`Resume the taskflow run "${result.runId}" using the taskflow tool with action="resume", runId="${result.runId}".`,
-						);
-					} else {
-						ctx.ui.notify("Agent is busy; try /tf resume when idle.", "warning");
-					}
-				}
+				await openRunHistory(pi, ctx);
 				return;
 			}
 

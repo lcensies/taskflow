@@ -113,6 +113,14 @@ export interface PhaseState {
 	subProgress?: { done: number; total: number; running: number; failed: number };
 	/** Latest activity line from the running subagent(s). */
 	liveText?: string;
+	/** Recent activity lines (oldest first), bounded by LIVE_LOG_MAX. The single
+	 *  `liveText` line is what fits in the progress block; this is the history the
+	 *  live inspector and post-hoc `peek` read. */
+	liveLog?: string[];
+	/** Set when a user message was delivered into this phase's subagent mid-run.
+	 *  Its output no longer follows from the flow definition alone, so it is never
+	 *  written to the cross-run cache. */
+	steered?: true;
 	/** Gate verdict (gate phases only). */
 	gate?: {
 		verdict: "pass" | "block";

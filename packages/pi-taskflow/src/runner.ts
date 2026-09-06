@@ -15,6 +15,7 @@ import {
 	runSubagentProcess,
 	unknownAgentResult,
 	normalizePiChildSettings,
+	readSteerMessages,
 	DEFAULT_PI_CHILD_SETTINGS,
 	type AgentConfig,
 	type CompletionPolicy,
@@ -444,15 +445,28 @@ export async function runAgentTask(
 		// `-p` mode. The env vars drive the dual-identity branch in index.ts.
 		const ctxEnv: Record<string, string> = {};
 		const extensionPaths = [...configuredExtensions];
-		if (opts.ctxDir && opts.nodeId) {
+		const needsSelf = Boolean((opts.ctxDir && opts.nodeId) || (opts.steerFile && opts.nodeId));
+		if (needsSelf) {
 			const selfPath = ctxExtensionPath();
 			if (selfPath) extensionPaths.push(selfPath);
-			ctxEnv.PI_TASKFLOW_CTX_DIR = opts.ctxDir;
-			ctxEnv.PI_TASKFLOW_NODE_ID = opts.nodeId;
+			ctxEnv.PI_TASKFLOW_NODE_ID = opts.nodeId!;
+		}
+		if (opts.ctxDir && opts.nodeId) ctxEnv.PI_TASKFLOW_CTX_DIR = opts.ctxDir;
+		// Steering: messages queued BEFORE this call starts are folded into the task
+		// (the child cannot be steered before it exists); the child then tails the
+		// file from that offset so a queued message is never delivered twice.
+		let steeredTask = task;
+		if (opts.steerFile && opts.nodeId) {
+			const pending = readSteerMessages(opts.steerFile);
+			if (pending.messages.length > 0) {
+				steeredTask = `${task}\n\n## Additional instructions from the user\n\n${pending.messages.map((m) => `- ${m}`).join("\n")}`;
+			}
+			ctxEnv.PI_TASKFLOW_STEER_FILE = opts.steerFile;
+			ctxEnv.PI_TASKFLOW_STEER_OFFSET = String(pending.offset);
 		}
 		for (const extensionPath of [...new Set(extensionPaths)]) args.push("--extension", extensionPath);
 		// Pi treats the prompt as a positional argument; all flags must precede it.
-		args.push(`Task: ${task}`);
+		args.push(`Task: ${steeredTask}`);
 		const invocation = getPiInvocation(args);
 		const childEnv = { ...process.env, ...ctxEnv };
 		// A child agent is not a host principal. Never let it inherit the

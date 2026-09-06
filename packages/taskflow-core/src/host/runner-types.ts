@@ -108,6 +108,12 @@ export interface RunOptions {
 	 */
 	ctxDir?: string;
 	nodeId?: string;
+	/**
+	 * Steering channel (opt-in). When set, the host may deliver user messages
+	 * appended to this file into the running subagent. A host without that
+	 * capability ignores it (fail-open: steering is simply unavailable).
+	 */
+	steerFile?: string;
 	/** @internal Host-to-runtime linearization hook. Process runners call this
 	 * synchronously when a terminal candidate is irreversibly committed, before
 	 * sending reap signals. Flow data cannot provide this callback. */

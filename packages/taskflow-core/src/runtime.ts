@@ -53,6 +53,7 @@ import { CacheStore, resolveFingerprint } from "./cache.ts";
 import { compileTaskflowToIR, phaseFingerprint } from "./flowir/index.ts";
 import { computeStaleFrontier, declaredReadMapOfDef, readMapOf } from "./stale.ts";
 import { ctxDirFor, drainPendingSpawns, initCtxDir, registerNode, setNodeStatus, type SpawnAssignment } from "./context-store.ts";
+import { steerFileFor } from "./steer.ts";
 import { allocateWorkspace, isWorkspaceKeyword, type Workspace } from "./workspace.ts";
 import {
 	cwdArgName,
@@ -104,6 +105,9 @@ export interface RuntimeDeps {
 	persist?: (state: RunState) => void;
 	/** Live progress callback for TUI streaming. */
 	onProgress?: (state: RunState) => void;
+	/** Steering root for this run (see steer.ts). When set, every subagent call
+	 *  gets a per-node steer file so the host can deliver messages mid-run. */
+	steerDir?: string;
 	/** Injectable task runner (defaults to spawning a real subagent). Enables testing. */
 	runTask?: RunTaskFn;
 	/** Resolve an `approval` phase. Omit for non-interactive runs (auto-reject). */
@@ -625,11 +629,28 @@ function unreplayableReason(state: RunState, phase: Phase): "context-sharing" | 
 	return undefined;
 }
 
+/** Bounded activity history per phase. Deep enough to answer "what has this
+ *  been doing for the last minute", small enough that run state stays cheap. */
+export const LIVE_LOG_MAX = 20;
+
+/** Record one activity line: sets `liveText` and appends to the bounded ring.
+ *  Consecutive duplicates are collapsed (a re-emitted tick is not new activity). */
+function pushLive(ps: PhaseState | undefined, text: string | undefined): void {
+	if (!ps) return;
+	ps.liveText = text;
+	const line = text?.trim();
+	if (!line) return;
+	const log = ps.liveLog ?? (ps.liveLog = []);
+	if (log[log.length - 1] === line) return;
+	log.push(line);
+	if (log.length > LIVE_LOG_MAX) log.splice(0, log.length - LIVE_LOG_MAX);
+}
+
 function liveSink(state: RunState, phaseId: string, emitProgress: () => void): (l: LiveUpdate) => void {
 	return (l: LiveUpdate) => {
 		const live = state.phases[phaseId];
 		if (live) {
-			live.liveText = l.text;
+			pushLive(live, l.text);
 			live.usage = l.usage;
 			live.model = l.model;
 		}
@@ -1651,6 +1672,7 @@ async function executePhaseInner(
 		fingerprint: cacheScope === "cross-run" ? resolveFingerprint(phase.cache?.fingerprint, effCwd) : "",
 		store: deps.cacheStore ?? new CacheStore(deps.cwd),
 		prior,
+		steered: () => state.phases[phase.id]?.steered === true,
 		phaseId: phase.id,
 		flowName: state.flowName,
 		runId: state.runId,
@@ -1722,7 +1744,11 @@ async function executePhaseInner(
 			signal: signal ?? deps.signal,
 			onLive,
 			ctxDir: ctxDir,
-			nodeId: ctxDir ? ctxNodeId : undefined,
+			// nodeId identifies the call for BOTH the ctx tree and the steer channel,
+			// so it is passed whenever the caller resolved one.
+			nodeId: ctxNodeId,
+			steerFile:
+				deps.steerDir && ctxNodeId ? steerFileFor(deps.steerDir, ctxNodeId) : undefined,
 			idleTimeoutMs: effIdleTimeoutMs,
 			onTerminalCommit,
 		};
@@ -2079,7 +2105,7 @@ async function executePhaseInner(
 			if (live) {
 				live.subProgress = { done, total, running, failed };
 				live.usage = aggregateUsage(liveUsages);
-				live.liveText = latestText;
+				pushLive(live, latestText);
 				live.model = latestModel;
 			}
 			emitProgress();
@@ -2136,7 +2162,7 @@ async function executePhaseInner(
 				if (l.text) latestText = l.text;
 				if (l.model) latestModel = l.model;
 				refresh();
-			}, ctxDir ? nodeIdFor(String(idx)) : undefined, undefined, undefined, it.cwd);
+			}, nodeIdFor(String(idx)), undefined, undefined, it.cwd);
 			running--;
 			done++;
 			if (isFailed(r)) failed++;
@@ -3223,7 +3249,7 @@ async function executePhaseInner(
 						failed: ph.filter((p) => p.status === "failed").length,
 					};
 					const cur = ph.find((p) => p.status === "running");
-					if (cur) live.liveText = `↳ ${cur.id}${cur.liveText ? `: ${cur.liveText}` : ""}`;
+					if (cur) pushLive(live, `↳ ${cur.id}${cur.liveText ? `: ${cur.liveText}` : ""}`);
 					live.usage = aggregateUsage(ph.map((p) => p.usage ?? emptyUsage()));
 				}
 				emitProgress();
@@ -3828,6 +3854,9 @@ export interface PhaseCacheCtx {
 	fingerprint: string;
 	store: CacheStore;
 	prior: PhaseState | undefined;
+	/** True once a user message was delivered into this phase's subagent — the
+	 *  result is then not reusable across runs (see recordCache). */
+	steered?: () => boolean;
 	phaseId: string;
 	flowName: string;
 	runId: string;
@@ -4012,6 +4041,9 @@ function cachedPhase(cc: PhaseCacheCtx, keys: CacheKeys): PhaseState | null {
 /** Persist a freshly-computed phase result to the cross-run store (best-effort). */
 function recordCache(cc: PhaseCacheCtx, ps: PhaseState): void {
 	if (cc.scope !== "cross-run") return;
+	// A steered result did not follow from the flow definition alone; replaying it
+	// for an unchanged definition would be a lie.
+	if (ps.steered || cc.steered?.()) return;
 	if (ps.status !== "done" || !ps.inputHash) return;
 	if (ps.cacheHit) return; // don't re-store a value we just read from cache
 	cc.store.put({
@@ -4811,7 +4843,14 @@ async function runTaskflowLayers(state: RunState, deps: RuntimeDeps): Promise<Ru
 			const ps = await executePhase(phase, state, deps, prior, () => safeProgress(deps, state));
 			// Preserve the phase start time: executePhase returns a fresh PhaseState
 			// that omits startedAt (cached/resumed results carry their own).
-			state.phases[phase.id] = ps.startedAt ? ps : { ...ps, startedAt };
+			// The activity history and the steered marker were accumulated on the LIVE
+			// entry while the phase ran; the fresh result object does not carry them.
+			const livePs = state.phases[phase.id];
+			state.phases[phase.id] = {
+				...(ps.startedAt ? ps : { ...ps, startedAt }),
+				...(ps.liveLog === undefined && livePs?.liveLog ? { liveLog: livePs.liveLog } : {}),
+				...(livePs?.steered ? { steered: true as const } : {}),
+			};
 			// A blocking verdict (gate phase OR a rejected approval) halts the flow.
 			const ptype = phase.type ?? "agent";
 			if (ps.gate?.verdict === "block" && (ptype === "gate" || ptype === "approval")) {
