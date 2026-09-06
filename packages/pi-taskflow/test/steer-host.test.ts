@@ -121,11 +121,11 @@ test("runAgentTask: steerFile injects the child extension, env, and folds queued
 		const steerFile = path.join(dir, "steer", "p.jsonl");
 		appendSteerMessage(steerFile, "also check the RPC path");
 
-		await runAgentTask(dir, agents, "t", "do work", { steerFile, nodeId: "p" });
+		await runAgentTask(dir, agents, "t", "do work", { steerFile });
 		const on = JSON.parse(fs.readFileSync(capture, "utf-8"));
 		assert.equal(on.steerFile, steerFile, "steer file passed to the child");
-		assert.equal(on.nodeId, "p");
 		assert.equal(on.ctxDir, null, "steering does not imply context sharing");
+		assert.equal(on.nodeId, null, "ctx identity is not injected for steering alone");
 		assert.equal(on.hasExtension, true, "child loads taskflow's extension to run the watcher");
 		assert.match(on.prompt, /do work/);
 		assert.match(on.prompt, /also check the RPC path/, "queued message folded into the task");

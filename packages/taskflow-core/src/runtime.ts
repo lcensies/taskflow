@@ -1744,9 +1744,10 @@ async function executePhaseInner(
 			signal: signal ?? deps.signal,
 			onLive,
 			ctxDir: ctxDir,
-			// nodeId identifies the call for BOTH the ctx tree and the steer channel,
-			// so it is passed whenever the caller resolved one.
-			nodeId: ctxNodeId,
+			nodeId: ctxDir ? ctxNodeId : undefined,
+			// The steer channel identifies a call by the same node id, but is
+			// independent of context sharing (a phase can be steerable without
+			// getting ctx_* tools).
 			steerFile:
 				deps.steerDir && ctxNodeId ? steerFileFor(deps.steerDir, ctxNodeId) : undefined,
 			idleTimeoutMs: effIdleTimeoutMs,

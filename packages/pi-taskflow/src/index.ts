@@ -766,8 +766,8 @@ export default function (pi: ExtensionAPI) {
 	const ctxDir = process.env.PI_TASKFLOW_CTX_DIR;
 	const nodeId = process.env.PI_TASKFLOW_NODE_ID;
 	const steerFile = process.env.PI_TASKFLOW_STEER_FILE;
-	if (nodeId && (ctxDir || steerFile)) {
-		if (ctxDir) registerCtxTools(pi, ctxDir, nodeId);
+	if (steerFile || (ctxDir && nodeId)) {
+		if (ctxDir && nodeId) registerCtxTools(pi, ctxDir, nodeId);
 		if (steerFile) {
 			// Deliver as a steer: pi queues it and hands it to the model after the
 			// current assistant turn's tool calls, before the next model call.

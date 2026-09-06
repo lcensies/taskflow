@@ -445,18 +445,20 @@ export async function runAgentTask(
 		// `-p` mode. The env vars drive the dual-identity branch in index.ts.
 		const ctxEnv: Record<string, string> = {};
 		const extensionPaths = [...configuredExtensions];
-		const needsSelf = Boolean((opts.ctxDir && opts.nodeId) || (opts.steerFile && opts.nodeId));
+		const needsSelf = Boolean((opts.ctxDir && opts.nodeId) || opts.steerFile);
 		if (needsSelf) {
 			const selfPath = ctxExtensionPath();
 			if (selfPath) extensionPaths.push(selfPath);
-			ctxEnv.PI_TASKFLOW_NODE_ID = opts.nodeId!;
 		}
-		if (opts.ctxDir && opts.nodeId) ctxEnv.PI_TASKFLOW_CTX_DIR = opts.ctxDir;
+		if (opts.ctxDir && opts.nodeId) {
+			ctxEnv.PI_TASKFLOW_CTX_DIR = opts.ctxDir;
+			ctxEnv.PI_TASKFLOW_NODE_ID = opts.nodeId;
+		}
 		// Steering: messages queued BEFORE this call starts are folded into the task
 		// (the child cannot be steered before it exists); the child then tails the
 		// file from that offset so a queued message is never delivered twice.
 		let steeredTask = task;
-		if (opts.steerFile && opts.nodeId) {
+		if (opts.steerFile) {
 			const pending = readSteerMessages(opts.steerFile);
 			if (pending.messages.length > 0) {
 				steeredTask = `${task}\n\n## Additional instructions from the user\n\n${pending.messages.map((m) => `- ${m}`).join("\n")}`;
