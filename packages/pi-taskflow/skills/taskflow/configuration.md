@@ -345,6 +345,8 @@ Taskflow shares the subagent settings file at `~/.pi/agent/settings.json`:
     "globalThinking": "medium"              // fallback thinking for all subagents
   },
 	"taskflow": {
+		"steering": true,                      // mid-run steering from the inspector
+		"inspectorShortcut": "ctrl+alt+t",      // opens the live inspector
 		"piChild": {
 			"resourceProfile": "isolated",       // isolated | allowlist | inherit
 			"extensions": [],                    // absolute trusted paths; allowlist only
@@ -373,6 +375,15 @@ Taskflow shares the subagent settings file at `~/.pi/agent/settings.json`:
 - Process-group reaping contains ordinary extension descendants; it is not an
   OS sandbox against malicious code that deliberately escapes into a new
   session. Do not allowlist untrusted extensions.
+- `taskflow.steering` (default `true`) opens a per-subagent steer channel for
+  interactive runs, so the inspector's `s` can deliver a message into a running
+  phase. Off → inspection stays, steering does not. Headless/detached runs never
+  open the channel. Steering loads Taskflow's own extension into each child (the
+  same injection context sharing already uses), so it survives
+  `resourceProfile: "isolated"`.
+- `taskflow.inspectorShortcut` (default `ctrl+alt+t`) rebinds the live inspector.
+  An invalid or conflicting key is reported at startup and leaves the rest of
+  the extension working.
 
 ---
 
