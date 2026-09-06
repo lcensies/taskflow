@@ -42,6 +42,11 @@ export interface TaskflowSettings {
 	embedder?: EmbedderConfig;
 	/** Host-only Pi child isolation/completion policy. */
 	piChild: PiChildSettings;
+	/** Mid-run steering. When off, no steer channel is opened for subagents
+	 *  (inspection stays available). Hosts without a UI never steer regardless. */
+	steering: boolean;
+	/** Key that opens the live inspector while a run holds the turn. */
+	inspectorShortcut: string;
 }
 
 import { DEFAULT_KEPT_RUNS, DEFAULT_RUN_AGE_DAYS, writeFileAtomic } from "./store.ts";
@@ -55,6 +60,8 @@ export const DEFAULT_TASKFLOW_SETTINGS: TaskflowSettings = {
 	maxRunAgeDays: DEFAULT_RUN_AGE_DAYS,
 	library: { ...DEFAULT_LIBRARY_SETTINGS },
 	piChild: { ...DEFAULT_PI_CHILD_SETTINGS, extensions: [] },
+	steering: true,
+	inspectorShortcut: "ctrl+alt+t",
 };
 
 export function normalizePiChildSettings(raw: unknown): PiChildSettings {
@@ -105,6 +112,11 @@ export function normalizeTaskflowSettings(raw: unknown): TaskflowSettings {
 			typeof rec.maxRunAgeDays === "number" && rec.maxRunAgeDays >= 0 && Number.isInteger(rec.maxRunAgeDays)
 				? rec.maxRunAgeDays
 				: DEFAULT_TASKFLOW_SETTINGS.maxRunAgeDays,
+		steering: typeof rec.steering === "boolean" ? rec.steering : DEFAULT_TASKFLOW_SETTINGS.steering,
+		inspectorShortcut:
+			typeof rec.inspectorShortcut === "string" && rec.inspectorShortcut.trim()
+				? rec.inspectorShortcut.trim()
+				: DEFAULT_TASKFLOW_SETTINGS.inspectorShortcut,
 		library: normalizeLibrarySettings(rec.library),
 		piChild: normalizePiChildSettings(rec.piChild),
 	};

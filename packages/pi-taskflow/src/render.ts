@@ -372,6 +372,23 @@ export function renderProgress(state: RunState, theme: Theme): string {
 	return text;
 }
 
+/** Recent activity per running phase (expanded view of an in-flight run). */
+export function renderRunningActivity(state: RunState, theme: Theme, perPhase = 6): string {
+	const blocks: string[] = [];
+	for (const phase of state.def.phases) {
+		const ps = state.phases[phase.id];
+		if (ps?.status !== "running") continue;
+		const log = (ps.liveLog ?? []).slice(-perPhase);
+		if (log.length === 0) continue;
+		blocks.push(
+			`  ${theme.fg("accent", phase.id)}\n` +
+				log.map((l) => `    ${theme.fg("dim", "› ")}${theme.fg("muted", l.length > 100 ? `${l.slice(0, 100)}…` : l)}`).join("\n"),
+		);
+	}
+	if (blocks.length === 0) return "";
+	return `${theme.fg("muted", "─── Activity ───")}\n${blocks.join("\n")}`;
+}
+
 export function renderRunResult(
 	state: RunState,
 	finalOutput: string,
@@ -387,6 +404,13 @@ export function renderRunResult(
 	const mdTheme = getMarkdownTheme();
 	const container = new Container();
 	container.addChild(new Text(renderProgress(state, theme), 0, 0));
+	// While the run is in flight there is no result yet — show what the running
+	// phases have been doing instead of an empty block.
+	const activity = renderRunningActivity(state, theme);
+	if (activity) {
+		container.addChild(new Spacer(1));
+		container.addChild(new Text(activity, 0, 0));
+	}
 	container.addChild(new Spacer(1));
 	container.addChild(new Text(theme.fg("muted", "─── Result ───"), 0, 0));
 	if (finalOutput.trim()) {
