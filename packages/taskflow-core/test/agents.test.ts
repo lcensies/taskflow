@@ -108,6 +108,8 @@ test("normalizeTaskflowSettings: accepts only boolean preference values", () => 
 		syncBuiltinAgentsToProject: true,
 		maxKeptRuns: DEFAULT_TASKFLOW_SETTINGS.maxKeptRuns,
 		maxRunAgeDays: DEFAULT_TASKFLOW_SETTINGS.maxRunAgeDays,
+		steering: DEFAULT_TASKFLOW_SETTINGS.steering,
+		inspectorShortcut: DEFAULT_TASKFLOW_SETTINGS.inspectorShortcut,
 		library: { enabled: true, scope: "both" },
 		piChild: { resourceProfile: "isolated", extensions: [], terminalGraceMs: 1500 },
 	});
@@ -518,6 +520,8 @@ test("readSubagentSettings: parses taskflow preferences from settings.json", () 
 		syncBuiltinAgentsToProject: false,
 		maxKeptRuns: 100,
 		maxRunAgeDays: 30,
+		steering: true,
+		inspectorShortcut: "ctrl+alt+t",
 		library: { enabled: true, scope: "both" },
 		piChild: { resourceProfile: "isolated", extensions: [], terminalGraceMs: 1500 },
 	});

@@ -891,6 +891,8 @@ test("runInteractiveInit: 'Configure taskflow preferences' → disable built-ins
 		maxRunAgeDays: 30,
 		library: { enabled: true, scope: "both" },
 		piChild: { resourceProfile: "isolated", extensions: [], terminalGraceMs: 1500 },
+		steering: true,
+		inspectorShortcut: "ctrl+alt+t",
 	});
 });
 
