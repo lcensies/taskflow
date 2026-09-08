@@ -21,6 +21,27 @@ export interface DetachedCancelRequest {
 const DEFAULT_POLL_MS = 250;
 const CONTROL_VERSION = 1;
 
+/**
+ * JS runtime to spawn `detached-runner.js` with.
+ *
+ * `process.execPath` is only a JS runtime when the host runs under plain
+ * node/bun. A compiled single-file host (Bun-built `pi`, Node SEA) makes it the
+ * agent binary itself, which ignores the script argument and boots a full agent
+ * session: the context file is never read, the start gate never consumed, and
+ * the run is stranded at "running" — the parent's exit guard cannot fire either,
+ * because that process never exits. Fall back to `node` from PATH so a missing
+ * runtime surfaces as a spawn ENOENT the launcher already records.
+ */
+export function jsRuntimeExecPath(
+	execPath: string = process.execPath,
+	platform: NodeJS.Platform = process.platform,
+): string {
+	const override = process.env.PI_TASKFLOW_NODE_BIN?.trim();
+	if (override) return override;
+	const p = platform === "win32" ? path.win32 : path.posix;
+	return /^(node|bun)(\.exe)?$/.test(p.basename(execPath).toLowerCase()) ? execPath : "node";
+}
+
 export const DETACHED_CONTROL_VERSION = CONTROL_VERSION;
 export const DETACHED_CONTROL_CWD_ENV = "TASKFLOW_DETACHED_CONTROL_CWD";
 export const DETACHED_CONTROL_RUN_ID_ENV = "TASKFLOW_DETACHED_CONTROL_RUN_ID";
