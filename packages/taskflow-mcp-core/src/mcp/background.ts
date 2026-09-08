@@ -12,6 +12,7 @@ import {
 	directoryIdentity,
 	DETACHED_CONTROL_VERSION,
 	isProcessAlive,
+	jsRuntimeExecPath,
 	killProcessTree,
 	listRuns,
 	loadRun,
@@ -140,7 +141,7 @@ export function launchMcpBackgroundRun(options: BackgroundLaunchOptions): { pid:
 		}), { encoding: "utf8", flag: "wx", mode: 0o600 });
 		const runnerScript = fileURLToPath(import.meta.resolve("taskflow-core/detached-runner"));
 		child = spawn(
-			process.execPath,
+			jsRuntimeExecPath(),
 			[...detachedNodeArgs(runnerScript), runnerScript, contextPath],
 			{
 				cwd: state.cwd,

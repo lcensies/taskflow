@@ -101,8 +101,16 @@ test("regression: detached context preserves invocation-level cache and reuse se
 test("regression: Pi background runner has no host-owned stdio pipe", () => {
 	assert.match(
 		SRC,
-		/spawn\(process\.execPath,[\s\S]{0,400}detached:\s*true,[\s\S]{0,120}stdio:\s*"ignore"/,
+		/spawn\(jsRuntimeExecPath\(\),[\s\S]{0,400}detached:\s*true,[\s\S]{0,120}stdio:\s*"ignore"/,
 		"a durable detached runner must not retain a Pi-owned stdout/stderr pipe",
+	);
+});
+
+test("regression: detached runner is spawned with a JS runtime, not the compiled Pi binary", () => {
+	assert.doesNotMatch(
+		SRC,
+		/spawn\(process\.execPath,\s*\[runnerScript/,
+		"under a compiled single-file Pi, process.execPath is the agent binary: it ignores the script argument, never reads the context file, and never exits, stranding the run at 'running'",
 	);
 });
 

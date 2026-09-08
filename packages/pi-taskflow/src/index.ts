@@ -35,7 +35,7 @@ import { ApprovalViewComponent, createApprovalRequester, type ApprovalChoice } f
 import { createWebCommand } from "./web-command.ts";
 import { InspectorComponent, type InspectorResult } from "./inspector-view.ts";
 import { clearActiveRun, getActiveRun, setActiveRun } from "./active-run.ts";
-import { appendSteerMessage, steerDirFor, steerFileFor } from "taskflow-core";
+import { appendSteerMessage, jsRuntimeExecPath, steerDirFor, steerFileFor } from "taskflow-core";
 import { startSteerWatcher } from "./steer-watch.ts";
 import {
 	executeTaskflow,
@@ -1657,7 +1657,7 @@ export default function (pi: ExtensionAPI) {
 					const childEnv: NodeJS.ProcessEnv = { ...process.env, TASKFLOW_DETACHED_RUNNER: "1" };
 					const parentPiEntry = resolveParentPiCliEntry();
 					if (parentPiEntry) childEnv[PI_TASKFLOW_PI_ENTRY_ENV] = parentPiEntry;
-					const child = spawn(process.execPath, [runnerScript, tmpFile], {
+					const child = spawn(jsRuntimeExecPath(), [runnerScript, tmpFile], {
 						detached: true,
 						stdio: "ignore",
 						env: childEnv,
