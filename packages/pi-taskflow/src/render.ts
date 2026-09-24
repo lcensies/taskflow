@@ -6,7 +6,7 @@
  */
 
 import { getMarkdownTheme, type Theme } from "@earendil-works/pi-coding-agent";
-import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
+import { Container, Markdown, Spacer, Text, truncateToWidth, type Component } from "@earendil-works/pi-tui";
 import { type UsageStats } from "taskflow-core";
 import type { PhaseState, RunState } from "taskflow-core";
 import { dependenciesOf, type Phase, topoLayers } from "taskflow-core";
@@ -21,7 +21,8 @@ const ICON: Record<PhaseState["status"], { ch: string; color: string }> = {
 };
 
 function icon(status: PhaseState["status"], theme: Theme): string {
-	if (status === "running") return theme.fg("warning", spinnerFrame());
+	// Static glyph even while running — the footer carries the only animation,
+	// so a per-frame redraw never touches a row above it.
 	const i = ICON[status] ?? ICON.pending;
 	return theme.fg(i.color as any, i.ch);
 }
@@ -259,7 +260,7 @@ function phaseDetailInner(phase: Phase, ps: PhaseState | undefined, theme: Theme
 	return s;
 }
 
-/** Header line: status glyph + name + compact totals. */
+/** Header line: static status glyph + name + compact totals (no per-frame animation — see footerLine). */
 function headerLine(state: RunState, theme: Theme): string {
 	const phases = Object.values(state.phases);
 	const done = phases.filter((p) => p.status === "done").length;
@@ -276,7 +277,7 @@ function headerLine(state: RunState, theme: Theme): string {
 					? theme.fg("error", "⊗")
 					: state.status === "paused"
 						? theme.fg("warning", "‖")
-						: theme.fg("warning", spinnerFrame());
+						: theme.fg("warning", "▸");
 
 	let line =
 		`${head} ${theme.fg("toolTitle", theme.bold("taskflow"))} ` +
@@ -285,6 +286,17 @@ function headerLine(state: RunState, theme: Theme): string {
 	if (running) line += theme.fg("warning", ` · ${running}▸`);
 	if (failed) line += theme.fg("error", ` · ${failed}✗`);
 	if (state.status === "blocked") line += theme.fg("error", " · blocked");
+	return line;
+}
+
+/**
+ * Footer line: the last line of the block and the only one carrying
+ * time-based content (spinner, run elapsed, cost). Keeping every animated bit
+ * here means a redraw only ever changes this one line, never a row above it.
+ */
+function footerLine(state: RunState, theme: Theme): string {
+	const spin = state.status === "running" ? theme.fg("warning", spinnerFrame()) : theme.fg("dim", "·");
+	let line = `  ${spin}`;
 	const cost = aggregateCost(state);
 	const budget = state.def.budget;
 	if (budget?.maxUSD !== undefined) line += theme.fg("muted", ` · $${cost >= 0.01 ? cost.toFixed(2) : cost.toFixed(4)}/$${budget.maxUSD}`);
@@ -307,10 +319,27 @@ function railGlyph(i: number, size: number): string {
 	return "├";
 }
 
-/** The full dense progress block (header + DAG-ordered phase rows). */
-export function renderProgress(state: RunState, theme: Theme): string {
+const LABEL_MAX = 40;
+
+/**
+ * The full dense progress block: header, DAG-ordered phase rows, footer.
+ *
+ * `width`, when given, truncates every emitted line (no wrapping — wrapping
+ * would break the column grid). `maxRows`, when given (`renderRunResult`
+ * passes 14 for its collapsed view, counting the header and footer),
+ * collapses the body: running/failed rows and their immediate neighbours are
+ * kept, everything else is folded into `… N done · M pending` lines. Omit
+ * `maxRows` for an unbounded render (the expanded view, and every other
+ * caller that hasn't opted in).
+ */
+export function renderProgress(
+	state: RunState,
+	theme: Theme,
+	opts?: { width?: number; maxRows?: number },
+): string {
 	const phases = state.def.phases;
-	const idW = Math.max(...phases.map((p) => p.id.length), 2);
+	const labelOf = (p: Phase) => p.label ?? p.id;
+	const idW = Math.min(LABEL_MAX, Math.max(...phases.map((p) => labelOf(p).length), 2));
 	const typeW = Math.max(...phases.map((p) => (p.type ?? "agent").length), 4);
 	const defIndex = new Map(phases.map((p, i) => [p.id, i]));
 
@@ -319,27 +348,41 @@ export function renderProgress(state: RunState, theme: Theme): string {
 	// flow legible top-to-bottom without drawing a full graph.
 	const layers = topoLayers(phases);
 	const rendered = new Set<string>();
+	const order: { phase: Phase; rail: string; prevLayerIds: Set<string> }[] = [];
 
-	let text = headerLine(state, theme);
+	let prevLayerIds = new Set<string>();
+	for (const layer of layers) {
+		const ordered = [...layer].sort((a, b) => (defIndex.get(a.id) ?? 0) - (defIndex.get(b.id) ?? 0));
+		ordered.forEach((phase, i) => {
+			order.push({ phase, rail: railGlyph(i, ordered.length), prevLayerIds });
+			rendered.add(phase.id);
+		});
+		prevLayerIds = new Set(ordered.map((p) => p.id));
+	}
+	// Safety net: include any phase a malformed DAG left out of the layering.
+	for (const phase of phases) {
+		if (!rendered.has(phase.id)) order.push({ phase, rail: " ", prevLayerIds });
+	}
 
-	const renderRow = (phase: Phase, rail: string, prevLayerIds: Set<string>) => {
+	const renderRow = (phase: Phase, rail: string, prevLayerIds: Set<string>): string => {
 		const ps = state.phases[phase.id];
 		const status = ps?.status ?? "pending";
-		const id = phase.id.padEnd(idW);
+		const id = truncateToWidth(labelOf(phase), idW).padEnd(idW);
 		const type = (phase.type ?? "agent").padEnd(typeW);
 		const detail = phaseDetail(phase, ps, theme);
 
 		// Annotate only "long" edges — dependencies that skip past the adjacent
 		// layer. Edges into the immediately-preceding layer are implied by position
-		// (and the rail), so showing them would just add noise.
+		// (and the rail), so showing them would just add noise. Deps always show
+		// ids (not labels) — {steps.<id>} references use ids.
 		const longEdges = dependenciesOf(phase).filter((d) => !prevLayerIds.has(d));
 		const dep = longEdges.length
 			? theme.fg("dim", `  ↳ ${longEdges.join(", ")}`)
 			: "";
 
 		const gutter = rail === " " ? " " : theme.fg("borderMuted", rail);
-		text +=
-			`\n  ${gutter} ${icon(status, theme)} ` +
+		let row =
+			`  ${gutter} ${icon(status, theme)} ` +
 			theme.fg(status === "pending" ? "dim" : "text", id) +
 			"  " +
 			theme.fg("dim", type) +
@@ -352,24 +395,72 @@ export function renderProgress(state: RunState, theme: Theme): string {
 			const indent = " ".repeat(2 + 2 + 2 + idW + 2);
 			const msg = ps.liveText.replace(/\s+/g, " ").trim();
 			const snip = msg.length > 88 ? `${msg.slice(0, 88)}…` : msg;
-			text += `\n${indent}${theme.fg("dim", "› ")}${theme.fg("muted", snip)}`;
+			row += `\n${indent}${theme.fg("dim", "› ")}${theme.fg("muted", snip)}`;
 		}
-		rendered.add(phase.id);
+		return row;
 	};
 
-	let prevLayerIds = new Set<string>();
-	for (const layer of layers) {
-		const ordered = [...layer].sort((a, b) => (defIndex.get(a.id) ?? 0) - (defIndex.get(b.id) ?? 0));
-		ordered.forEach((phase, i) => renderRow(phase, railGlyph(i, ordered.length), prevLayerIds));
-		prevLayerIds = new Set(ordered.map((p) => p.id));
+	// Collapse the body when it would blow the row budget: keep every
+	// running/failed row plus one neighbour on each side, fold contiguous runs
+	// of everything else into a single summary line.
+	// Capping is opt-in: omitting maxRows renders every phase (existing callers
+	// that don't pass opts keep their current unbounded behaviour).
+	const maxRows = opts?.maxRows;
+	const bodyBudget = maxRows === undefined ? Number.POSITIVE_INFINITY : Math.max(1, maxRows - 2); // header + footer reserve one line each
+
+	const important = new Set<number>();
+	order.forEach(({ phase }, i) => {
+		const status = state.phases[phase.id]?.status;
+		if (status === "running" || status === "failed") important.add(i);
+	});
+	const keep = new Set<number>();
+	for (const i of important) {
+		keep.add(i);
+		if (i > 0) keep.add(i - 1);
+		if (i < order.length - 1) keep.add(i + 1);
 	}
 
-	// Safety net: render any phase a malformed DAG left out of the layering.
-	for (const phase of phases) {
-		if (!rendered.has(phase.id)) renderRow(phase, " ", prevLayerIds);
+	const bodyLines: string[] = [];
+	if (order.length <= bodyBudget || keep.size >= order.length) {
+		for (const { phase, rail, prevLayerIds } of order) bodyLines.push(renderRow(phase, rail, prevLayerIds));
+	} else {
+		let foldStart = -1;
+		const flushFold = (endExclusive: number) => {
+			if (foldStart < 0) return;
+			const group = order.slice(foldStart, endExclusive);
+			const doneCount = group.filter(({ phase }) => state.phases[phase.id]?.status === "done").length;
+			const pendingCount = group.length - doneCount;
+			bodyLines.push(theme.fg("dim", `  … ${doneCount} done · ${pendingCount} pending`));
+			foldStart = -1;
+		};
+		order.forEach(({ phase, rail, prevLayerIds }, i) => {
+			if (keep.has(i)) {
+				flushFold(i);
+				bodyLines.push(renderRow(phase, rail, prevLayerIds));
+			} else if (foldStart < 0) {
+				foldStart = i;
+			}
+		});
+		flushFold(order.length);
 	}
 
-	return text;
+	const lines = [headerLine(state, theme), ...bodyLines.flatMap((l) => l.split("\n")), footerLine(state, theme)];
+	const { width } = opts ?? {};
+	return (width ? lines.map((l) => truncateToWidth(l, width)) : lines).join("\n");
+}
+
+/**
+ * Cheap identity for "did anything visible change" — phase statuses, liveText
+ * and usage turns cover everything a row can show; the current footer second
+ * is folded in so a caller comparing fingerprints still redraws the
+ * spinner/elapsed footer on its own 1s tick.
+ */
+export function renderFingerprint(state: RunState): string {
+	const phaseParts = Object.entries(state.phases)
+		.map(([id, ps]) => `${id}:${ps.status}:${ps.liveText ?? ""}:${ps.usage?.turns ?? 0}`)
+		.join("|");
+	const footerSecond = Math.floor(Date.now() / 1000);
+	return `${state.status}#${phaseParts}#${footerSecond}`;
 }
 
 /** Recent activity per running phase (expanded view of an in-flight run). */
@@ -389,21 +480,41 @@ export function renderRunningActivity(state: RunState, theme: Theme, perPhase = 
 	return `${theme.fg("muted", "─── Activity ───")}\n${blocks.join("\n")}`;
 }
 
+/**
+ * A component wrapping a string-producing render function. Used instead of a
+ * pre-built `Text` for the progress block so truncation runs against the real
+ * viewport width on every render (`Text` word-wraps, which would break the
+ * column grid).
+ */
+class Lines implements Component {
+	private readonly fn: (width: number) => string;
+	constructor(fn: (width: number) => string) {
+		this.fn = fn;
+	}
+	render(width: number): string[] {
+		return this.fn(width).split("\n");
+	}
+	/** No-op — nothing cached, `fn` recomputes from `state` every render. */
+	invalidate(): void {}
+}
+
 export function renderRunResult(
 	state: RunState,
 	finalOutput: string,
 	theme: Theme,
 	expanded: boolean,
-): Container | Text {
-	if (!expanded) {
-		let text = renderProgress(state, theme);
-		text += `\n  ${theme.fg("dim", "Ctrl+O to expand")}`;
-		return new Text(text, 0, 0);
-	}
+): Component {
+	const progress = new Lines((width) => {
+		let text = renderProgress(state, theme, expanded ? { width } : { width, maxRows: 14 });
+		if (!expanded) text += `\n  ${theme.fg("dim", "Ctrl+O to expand")}`;
+		return text;
+	});
+
+	if (!expanded) return progress;
 
 	const mdTheme = getMarkdownTheme();
 	const container = new Container();
-	container.addChild(new Text(renderProgress(state, theme), 0, 0));
+	container.addChild(progress);
 	// While the run is in flight there is no result yet — show what the running
 	// phases have been doing instead of an empty block.
 	const activity = renderRunningActivity(state, theme);

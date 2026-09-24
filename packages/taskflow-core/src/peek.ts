@@ -11,8 +11,10 @@
  * Read-only: never mutates run state.
  */
 
+import * as fs from "node:fs";
 import type { PhaseState, RunState } from "./store.ts";
-import { loadRun } from "./store.ts";
+import { loadRun, runsDir, transcriptDirFor, transcriptFileFor } from "./store.ts";
+import { formatTranscript, parseTranscript } from "./transcript.ts";
 
 /** Default hard cap on peeked text (chars). */
 export const PEEK_DEFAULT_LIMIT = 4000;
@@ -28,6 +30,10 @@ export interface PeekOptions {
 	item?: number;
 	/** Truncation cap in chars (default PEEK_DEFAULT_LIMIT, max PEEK_MAX_LIMIT). */
 	limit?: number;
+	/** Read the node's raw transcript instead of its folded output. Node id is
+	 *  the phase id, or `<phase>-<item>` when `item` is set. Tail-truncated
+	 *  (oldest content dropped first) so the most recent activity survives. */
+	transcript?: boolean;
 }
 
 export interface PeekResult {
@@ -47,6 +53,20 @@ function truncate(text: string, limit: number): { text: string; truncated: boole
 	return { text: `${text.slice(0, limit)}\n… [truncated at ${limit} chars — total ${text.length}]`, truncated: true };
 }
 
+/** Truncate from the front, keeping the most recent (tail) content — used for
+ *  transcripts, where the latest activity matters most. */
+function truncateTail(text: string, limit: number): { text: string; truncated: boolean } {
+	if (text.length <= limit) return { text, truncated: false };
+	const dropped = text.length - limit;
+	return { text: `… [truncated ${dropped} chars from start — total ${text.length}]\n${text.slice(-limit)}`, truncated: true };
+}
+
+/** Minimal inline ANSI dim, matching the convention used by peek's other
+ *  plain-text consumers (no theme dependency in taskflow-core). */
+function dim(text: string): string {
+	return `\x1b[2m${text}\x1b[0m`;
+}
+
 function fmtStatus(ps: PhaseState): string {
 	const bits: string[] = [ps.status];
 	if (ps.timedOut) bits.push("timed-out");
@@ -61,7 +81,8 @@ function listPhases(state: RunState): string {
 		const ps = state.phases[p.id];
 		const status = ps ? fmtStatus(ps) : "pending";
 		const size = ps?.output ? ` — ${ps.output.length} chars` : "";
-		return `  ${p.id} [${status}]${size}`;
+		const name = p.label ? `${dim(p.id)} · ${p.label}` : p.id;
+		return `  ${name} [${status}]${size}`;
 	});
 	return `Run ${state.runId} (${state.flowName}) — ${state.status}\n\nPhases:\n${lines.join("\n")}\n\nPeek one with: peek ${state.runId} <phaseId>`;
 }
@@ -71,7 +92,7 @@ function listPhases(state: RunState): string {
  *  section order. mergePhaseState labels positionally but omits budget-skipped
  *  items entirely, so section order can have gaps; keying by label keeps
  *  `--item k` aligned with the original `over[k-1]`. */
-function splitItems(merged: string): Map<number, string> {
+export function splitItems(merged: string): Map<number, string> {
 	// mergePhaseState labels sections "### [k/N] <agent>" joined by "\n\n---\n\n".
 	const out = new Map<number, string>();
 	const parts = merged.split(/\n\n---\n\n(?=### \[\d+\/\d+\])/);
@@ -106,6 +127,20 @@ export function peekRun(cwd: string, runId: string, opts: PeekOptions = {}): Pee
 
 	const limit = clampLimit(opts.limit);
 	const header = `${runId} › ${ps.id} [${fmtStatus(ps)}]${ps.error ? `\nerror: ${ps.error.slice(0, 500)}` : ""}`;
+
+	if (opts.transcript) {
+		const nodeId = opts.item !== undefined ? `${ps.id}-${opts.item}` : ps.id;
+		const file = transcriptFileFor(transcriptDirFor(runsDir(cwd), state.flowName, runId), nodeId);
+		let raw: string;
+		try {
+			raw = fs.readFileSync(file, "utf-8");
+		} catch {
+			return { ok: false, text: `No transcript for '${nodeId}' in run ${runId} (transcripts are only recorded while the run executes).` };
+		}
+		const formatted = formatTranscript(parseTranscript(raw));
+		const t = truncateTail(formatted, limit);
+		return { ok: true, text: `${header}\n\n${t.text}`, truncated: t.truncated };
+	}
 
 	let body: string;
 	if (opts.item !== undefined) {

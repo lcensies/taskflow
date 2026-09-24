@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
 import { PEEK_DEFAULT_LIMIT, PEEK_MAX_LIMIT, peekRun } from "../src/peek.ts";
-import { saveRun, type RunState } from "../src/store.ts";
+import { runsDir, saveRun, transcriptDirFor, transcriptFileFor, type RunState } from "../src/store.ts";
 import type { Taskflow } from "../src/schema.ts";
 
 function mkTmp(): string {
@@ -187,6 +187,66 @@ test("peek: output is hard-truncated at the default limit and the cap is enforce
 		assert.ok(big.text.length <= PEEK_MAX_LIMIT + 200);
 		const garbage = peekRun(cwd, "peekflow-abc123", { phaseId: "report", limit: -5 });
 		assert.match(garbage.text, new RegExp(`truncated at ${PEEK_DEFAULT_LIMIT} chars`));
+	} finally {
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("peek: --transcript reads and formats the node's transcript file", () => {
+	const cwd = mkTmp();
+	try {
+		const state = seedRun(cwd);
+		const dir = transcriptDirFor(runsDir(cwd), state.flowName, state.runId);
+		fs.mkdirSync(dir, { recursive: true });
+		const lines = [
+			JSON.stringify({ type: "taskflow_attempt", attempt: 2, at: 1 }),
+			JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "scanning the repo" }] } }),
+			JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "toolCall", name: "read", arguments: { path: "a.ts" } }] } }),
+			JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "toolResult", name: "read", text: "file contents", isError: false }] } }),
+		].join("\n");
+		fs.writeFileSync(transcriptFileFor(dir, "scan"), lines);
+
+		const res = peekRun(cwd, state.runId, { phaseId: "scan", transcript: true });
+		assert.equal(res.ok, true);
+		assert.match(res.text, /attempt 2/);
+		assert.match(res.text, /scanning the repo/);
+		assert.match(res.text, /read/);
+		assert.match(res.text, /file contents/);
+
+		const missing = peekRun(cwd, state.runId, { phaseId: "report", transcript: true });
+		assert.equal(missing.ok, false);
+		assert.match(missing.text, /No transcript/);
+
+		// --item selects the per-item node file (`<phase>-<item>`).
+		fs.writeFileSync(
+			transcriptFileFor(dir, "audit-1"),
+			JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "item one activity" }] } }),
+		);
+		const itemRes = peekRun(cwd, state.runId, { phaseId: "audit", item: 1, transcript: true });
+		assert.equal(itemRes.ok, true);
+		assert.match(itemRes.text, /item one activity/);
+	} finally {
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("peek: --transcript truncates from the front, keeping the tail", () => {
+	const cwd = mkTmp();
+	try {
+		const state = seedRun(cwd);
+		const dir = transcriptDirFor(runsDir(cwd), state.flowName, state.runId);
+		fs.mkdirSync(dir, { recursive: true });
+		const events = Array.from({ length: 50 }, (_, i) =>
+			JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: `line-${i}` }] } }),
+		).join("\n");
+		fs.writeFileSync(transcriptFileFor(dir, "scan"), events);
+
+		const res = peekRun(cwd, state.runId, { phaseId: "scan", transcript: true, limit: 200 });
+		assert.equal(res.ok, true);
+		assert.equal(res.truncated, true);
+		assert.match(res.text, /truncated \d+ chars from start/);
+		assert.match(res.text, /line-49/);
+		assert.doesNotMatch(res.text, /line-0[^0-9]/);
 	} finally {
 		fs.rmSync(cwd, { recursive: true, force: true });
 	}

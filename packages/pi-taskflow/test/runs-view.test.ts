@@ -102,6 +102,45 @@ test("runs-view: selection follows the same runId across a refresh", async () =>
 	}
 });
 
+test("runs-view: Enter opens the run's phase list, Esc returns to the run list", () => {
+	const run = mkRun({
+		runId: "flow-p",
+		def: { name: "demo", phases: [{ id: "build" }, { id: "review" }] } as any,
+		phases: { build: { status: "completed" }, review: { status: "pending" } } as any,
+	});
+	const view = new RunHistoryComponent([run], theme, () => {});
+	view.handleInput("\r"); // Enter
+	const phases = view.render(80).join("\n");
+	assert.match(phases, /build/);
+	assert.match(phases, /review/);
+	assert.doesNotMatch(phases, /Taskflow runs/);
+	view.handleInput("\x1b"); // Esc pops the navigator's root level
+	assert.match(view.render(80).join("\n"), /Taskflow runs/);
+	view.dispose();
+});
+
+test("runs-view: j/k move the selection and q closes the panel", () => {
+	const a = mkRun({ runId: "flow-a", flowName: "alpha" });
+	const b = mkRun({ runId: "flow-b", flowName: "bravo" });
+	let closed = 0;
+	const view = new RunHistoryComponent([a, b], theme, () => {
+		closed++;
+	});
+	const selectedFlow = () =>
+		view
+			.render(80)
+			.find((l) => l.includes("❯"))
+			?.trim();
+	assert.match(selectedFlow() ?? "", /alpha/);
+	view.handleInput("j");
+	assert.match(selectedFlow() ?? "", /bravo/);
+	view.handleInput("k");
+	assert.match(selectedFlow() ?? "", /alpha/);
+	view.handleInput("q");
+	assert.equal(closed, 1, "q closes the panel");
+	view.dispose();
+});
+
 test("runs-view: no live hooks → no timer, renders static (back-compat)", () => {
 	const view = new RunHistoryComponent([mkRun()], theme, () => {});
 	const out = view.render(80).join("\n");

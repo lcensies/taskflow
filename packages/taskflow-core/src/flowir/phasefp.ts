@@ -28,9 +28,10 @@
  *      phases outside its static closure. The closure under-approximates its
  *      real reads, so fall back to whole-flow invalidation.
  *
- * `cache`, `retry`, `concurrency`, and `final` are stripped from each phase
- * before hashing: none of them changes the subagent's OUTPUT (they are policy,
- * execution mechanics, or result selection). `cache`'s sub-fields
+ * `cache`, `retry`, `concurrency`, `final`, and `label` are stripped from each
+ * phase before hashing: none of them changes the subagent's OUTPUT (they are
+ * policy, execution mechanics, result selection, or purely cosmetic display).
+ * `cache`'s sub-fields
  * (`scope`/`ttl`/`fingerprint`) reach the cache key through other paths
  * (`cc.scope` gates the lookup, `cc.ttlMs` governs expiry, `cc.fingerprint` is
  * in the key tail). Every other `Phase` field is hashed. `PhaseSchema` uses
@@ -56,8 +57,10 @@ import { canonicalJson, hashCanonical } from "./hash.ts";
  *     produces the same output regardless of how many attempts it took.
  *   - `concurrency`: fan-out parallelism; does not change any item's output.
  *   - `final`: marks which phase's output is the flow result; does not change
- *     the phase's own output. */
-const PHASE_FP_STRIP = ["cache", "retry", "concurrency", "final"] as const;
+ *     the phase's own output.
+ *   - `label`: a purely cosmetic display name (renderers/peek fall back to
+ *     `id`); never observed by the subagent. */
+const PHASE_FP_STRIP = ["cache", "retry", "concurrency", "final", "label"] as const;
 
 /** Clone a phase into a plain record with policy fields removed. */
 function stripPolicy(phase: Phase): Record<string, unknown> {

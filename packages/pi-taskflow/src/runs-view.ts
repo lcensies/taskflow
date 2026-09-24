@@ -1,11 +1,12 @@
 /**
  * Interactive run-history view for `/tf runs` (ctx.ui.custom).
- * List view: navigate runs; Enter → detail; r → resume; Esc/q → close.
+ * List view: navigate runs; Enter → the run's navigator (read-only inspector);
+ * r → resume; Esc/q → close.
  */
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
-import { renderProgress, renderRunningActivity, summarizeRun } from "./render.ts";
+import { boxRow, boxRule, boxTop, InspectorComponent, listKey } from "./inspector-view.ts";
+import { summarizeRun } from "./render.ts";
 import type { RunState } from "taskflow-core";
 
 export interface RunHistoryResult {
@@ -58,7 +59,8 @@ export class RunHistoryComponent {
 	private theme: Theme;
 	private onDone: (result?: RunHistoryResult) => void;
 	private selected = 0;
-	private mode: "list" | "detail" = "list";
+	/** Non-null while a run is open: every key and repaint belongs to it. */
+	private inspector?: InspectorComponent;
 	private cachedWidth?: number;
 	private cachedLines?: string[];
 	/** Live-refresh wiring: re-read run state from disk while the panel is open
@@ -66,6 +68,9 @@ export class RunHistoryComponent {
 	private timer?: ReturnType<typeof setInterval>;
 	private refresh?: () => RunState[];
 	private requestRender?: () => void;
+	/** Transcript file for one node of a run; undefined when the host keeps none. */
+	private transcriptFile?: (run: RunState, nodeId: string) => string | undefined;
+	private rows?: () => number;
 
 	constructor(
 		runs: RunState[],
@@ -74,6 +79,11 @@ export class RunHistoryComponent {
 		/** Optional live-refresh hooks. When both are provided the panel polls
 		 * `refresh()` on an interval and calls `requestRender()` if anything changed. */
 		live?: { refresh: () => RunState[]; requestRender: () => void; intervalMs?: number },
+		/** What the run's navigator needs: where transcripts live, how tall the terminal is. */
+		opts?: {
+			transcriptFile?: (run: RunState, nodeId: string) => string | undefined;
+			rows?: () => number;
+		},
 	) {
 		if (!runs.length) {
 			throw new Error("RunHistoryComponent requires at least one run");
@@ -81,6 +91,8 @@ export class RunHistoryComponent {
 		this.runs = runs;
 		this.theme = theme;
 		this.onDone = onDone;
+		this.transcriptFile = opts?.transcriptFile;
+		this.rows = opts?.rows;
 		if (live) {
 			this.refresh = live.refresh;
 			this.requestRender = live.requestRender;
@@ -117,36 +129,70 @@ export class RunHistoryComponent {
 			clearInterval(this.timer);
 			this.timer = undefined;
 		}
+		this.closeInspector();
+	}
+
+	/** Open the selected run's navigator; its `onDone` pops back to this list. */
+	private openInspector(): void {
+		const run = this.runs[this.selected];
+		if (!run) return;
+		const transcriptFile = this.transcriptFile;
+		this.inspector = new InspectorComponent(
+			run,
+			this.theme,
+			() => this.closeInspector(),
+			false, // a stored run has no steering channel
+			this.requestRender,
+			this.rows,
+			transcriptFile && ((nodeId: string) => transcriptFile(run, nodeId)),
+		);
+	}
+
+	private closeInspector(): void {
+		this.inspector?.dispose();
+		this.inspector = undefined;
+		this.invalidate();
+	}
+
+	/** Visible run rows — the step PgUp/PgDn moves the selection by. */
+	private page(): number {
+		return Math.max(3, Math.floor(this.rows?.() ?? 24) - 6);
 	}
 
 	handleInput(data: string): void {
 		this.invalidate();
-		if (this.mode === "detail") {
-			if (matchesKey(data, "escape")) {
-				this.mode = "list";
+		if (this.inspector) {
+			this.inspector.handleInput(data);
+			return;
+		}
+		const n = this.runs.length;
+		switch (listKey(data)) {
+			case "up":
+				this.selected = (this.selected - 1 + n) % n;
 				return;
-			}
-			if (data === "r" && isResumable(this.runs[this.selected])) {
-				this.onDone({ action: "resume", runId: this.runs[this.selected].runId });
-			}
-			return;
-		}
-		// list mode
-		if (matchesKey(data, "escape") || data === "q" || matchesKey(data, "ctrl+c")) {
-			this.onDone();
-			return;
-		}
-		if (matchesKey(data, "up")) {
-			this.selected = (this.selected - 1 + this.runs.length) % this.runs.length;
-			return;
-		}
-		if (matchesKey(data, "down")) {
-			this.selected = (this.selected + 1) % this.runs.length;
-			return;
-		}
-		if (matchesKey(data, "return")) {
-			this.mode = "detail";
-			return;
+			case "down":
+				this.selected = (this.selected + 1) % n;
+				return;
+			case "pageUp":
+				this.selected = Math.max(0, this.selected - this.page());
+				return;
+			case "pageDown":
+				this.selected = Math.min(n - 1, this.selected + this.page());
+				return;
+			case "top":
+				this.selected = 0;
+				return;
+			case "bottom":
+				this.selected = n - 1;
+				return;
+			case "in":
+				this.openInspector();
+				return;
+			// The run list is the root level: "out" has nothing to pop back to.
+			case "out":
+			case "close":
+				this.onDone();
+				return;
 		}
 		if (data === "r" && isResumable(this.runs[this.selected])) {
 			this.onDone({ action: "resume", runId: this.runs[this.selected].runId });
@@ -154,37 +200,10 @@ export class RunHistoryComponent {
 	}
 
 	render(width: number): string[] {
+		if (this.inspector) return this.inspector.render(width);
 		if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
 		const th = this.theme;
-		const lines: string[] = [""];
-
-		if (this.mode === "detail") {
-			const run = this.runs[this.selected];
-			lines.push(truncateToWidth(`  ${th.fg("accent", "Run ")}${th.fg("muted", run.runId)}`, width));
-			lines.push("");
-			for (const l of renderProgress(run, th).split("\n")) lines.push(truncateToWidth(l, width));
-			const activity = renderRunningActivity(run, th);
-			if (activity) {
-				lines.push("");
-				for (const l of activity.split("\n")) lines.push(truncateToWidth(l, width));
-			}
-			lines.push("");
-			const hint = isResumable(run) ? "Esc back · r resume" : "Esc back";
-			const liveTag = this.timer && run.status === "running" ? th.fg("success", " ● live") : "";
-			lines.push(truncateToWidth(`  ${th.fg("dim", hint)}${liveTag}`, width));
-			lines.push("");
-			this.cachedWidth = width;
-			this.cachedLines = lines;
-			return lines;
-		}
-
-		// list mode
-		const header =
-			th.fg("borderMuted", "─".repeat(3)) +
-			th.fg("accent", " Taskflow runs ") +
-			th.fg("borderMuted", "─".repeat(Math.max(0, width - 18)));
-		lines.push(truncateToWidth(header, width));
-		lines.push("");
+		const lines: string[] = [boxTop("Taskflow runs", width, th)];
 
 		this.runs.forEach((run, i) => {
 			const sel = i === this.selected;
@@ -192,16 +211,14 @@ export class RunHistoryComponent {
 			const badge = statusBadge(run.status, th);
 			const name = sel ? th.fg("text", run.flowName) : th.fg("muted", run.flowName);
 			const meta = th.fg("dim", `${summarizeRun(run)} · ${timeAgo(run.updatedAt)}`);
-			lines.push(truncateToWidth(`  ${marker}${badge}  ${name}  ${meta}`, width));
+			lines.push(boxRow(`${marker}${badge}  ${name}  ${meta}`, width, th));
 		});
 
-		lines.push("");
 		const anyRunning = this.runs.some((r) => r.status === "running");
 		const liveHint = this.timer && anyRunning ? th.fg("success", " ● live") : "";
-		lines.push(
-			truncateToWidth(`  ${th.fg("dim", "↑↓ select · Enter details · r resume · q close")}${liveHint}`, width),
-		);
-		lines.push("");
+		lines.push(boxRule(width, "├", "┤", th));
+		lines.push(boxRow(`${th.fg("dim", "↑↓/jk move · →/l open · r resume · q close")}${liveHint}`, width, th));
+		lines.push(boxRule(width, "╰", "╯", th));
 
 		this.cachedWidth = width;
 		this.cachedLines = lines;

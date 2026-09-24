@@ -32,7 +32,9 @@ export interface RaceBranch {
 }
 
 export interface RaceRunOne {
-	(agent: string, task: string, signal?: AbortSignal): Promise<RunResult>;
+	/** `index` is the branch's position, so the caller can give each branch a
+	 *  distinct node id (steer/transcript channel). */
+	(agent: string, task: string, signal?: AbortSignal, index?: number): Promise<RunResult>;
 }
 
 export interface RaceIsFailed {
@@ -105,7 +107,7 @@ export async function executeRaceBranches(
 		const branchPromises = branches.map(async (b, i) => {
 			let result: RunResult;
 			try {
-				result = await runOne(b.agent, b.task, controllers[i]!.signal);
+				result = await runOne(b.agent, b.task, controllers[i]!.signal, i);
 			} catch (e) {
 				const msg = e instanceof Error ? e.message : String(e);
 				result = {

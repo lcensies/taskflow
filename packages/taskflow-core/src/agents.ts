@@ -61,7 +61,9 @@ export const DEFAULT_TASKFLOW_SETTINGS: TaskflowSettings = {
 	library: { ...DEFAULT_LIBRARY_SETTINGS },
 	piChild: { ...DEFAULT_PI_CHILD_SETTINGS, extensions: [] },
 	steering: true,
-	inspectorShortcut: "ctrl+alt+t",
+	// alt+<letter> is ESC-prefixed, so it survives tmux without extended-keys and
+	// is not grabbed by GNOME (which binds Ctrl+Alt+T to "open terminal").
+	inspectorShortcut: "alt+t",
 };
 
 export function normalizePiChildSettings(raw: unknown): PiChildSettings {

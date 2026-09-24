@@ -521,7 +521,7 @@ test("readSubagentSettings: parses taskflow preferences from settings.json", () 
 		maxKeptRuns: 100,
 		maxRunAgeDays: 30,
 		steering: true,
-		inspectorShortcut: "ctrl+alt+t",
+		inspectorShortcut: "alt+t",
 		library: { enabled: true, scope: "both" },
 		piChild: { resourceProfile: "isolated", extensions: [], terminalGraceMs: 1500 },
 	});

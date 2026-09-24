@@ -1142,3 +1142,137 @@ test("runtime: map phase records observed readSet of its over-source (M3)", asyn
 	assert.ok(m.reads!.some((r) => r.stepId === "list"), "map recorded it read `list`");
 	assert.equal(m.reads!.find((r) => r.stepId === "list")?.version, state.phases.list.inputHash);
 });
+
+test("runtime: map phase items get per-item transcript files", async () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tf-transcript-"));
+	const def: Taskflow = {
+		name: "map-transcript",
+		phases: [
+			{ id: "list", type: "agent", agent: "a", task: "list", output: "json" },
+			{ id: "work", type: "map", over: "{steps.list.json}", agent: "a", task: "do {item}", dependsOn: ["list"], final: true },
+		],
+	};
+	const transcriptFiles: (string | undefined)[] = [];
+	const runTask: RuntimeDeps["runTask"] = async (_cwd, _agents, agentName, task, o: RunOptions) => {
+		transcriptFiles.push(o.transcriptFile);
+		return {
+			agent: agentName,
+			task,
+			exitCode: 0,
+			output: task === "list" ? '["a","b"]' : `did:${task}`,
+			stderr: "",
+			usage: emptyUsage(),
+			stopReason: "end",
+		};
+	};
+	const deps: RuntimeDeps = { cwd: "/tmp", agents: AGENTS, runTask, transcriptDir: dir, persist: () => {}, onProgress: () => {} };
+	const res = await executeTaskflow(mkState(def), deps);
+	assert.equal(res.ok, true);
+	assert.ok(transcriptFiles.includes(path.join(dir, "work-0.ndjson")), `expected work-0.ndjson among ${JSON.stringify(transcriptFiles)}`);
+	assert.ok(transcriptFiles.includes(path.join(dir, "work-1.ndjson")), `expected work-1.ndjson among ${JSON.stringify(transcriptFiles)}`);
+});
+
+/** A fake host that records each call into the transcript file it was handed. */
+function transcriptRunner(respond: (task: string) => string): RuntimeDeps["runTask"] {
+	return async (_cwd, _agents, agentName, task, o: RunOptions): Promise<RunResult> => {
+		if (o.transcriptFile) {
+			fs.mkdirSync(path.dirname(o.transcriptFile), { recursive: true });
+			fs.appendFileSync(o.transcriptFile, `${JSON.stringify({ type: "agent_end" })}\n`);
+		}
+		return { agent: agentName, task, exitCode: 0, output: respond(task), stderr: "", usage: emptyUsage(), stopReason: "end" };
+	};
+}
+
+test("runtime: tournament variants and the judge each get their own transcript file", async () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tf-transcript-"));
+	const def: Taskflow = {
+		name: "tournament-transcript",
+		phases: [
+			{ id: "t", type: "tournament", agent: "a", variants: 2, mode: "best", task: "compete", judge: "pick one", final: true },
+		],
+	};
+	const runTask = transcriptRunner((t) => (t.includes("candidate variants") ? "WINNER: 1" : "variant answer"));
+	const deps: RuntimeDeps = { cwd: "/tmp", agents: AGENTS, runTask, transcriptDir: dir, persist: () => {}, onProgress: () => {} };
+	try {
+		const res = await executeTaskflow(mkState(def), deps);
+		assert.equal(res.ok, true);
+		assert.deepEqual(fs.readdirSync(dir).sort(), ["t-0.ndjson", "t-1.ndjson", "t-judge.ndjson"]);
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("runtime: each loop iteration gets its own transcript file", async () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tf-transcript-"));
+	const def: Taskflow = {
+		name: "loop-transcript",
+		phases: [
+			{ id: "l", type: "loop", agent: "a", task: "iterate", until: "{loop.iteration} >= 99", maxIterations: 2, final: true },
+		],
+	};
+	// Distinct output per iteration: identical output would stop the loop on convergence.
+	let iter = 0;
+	const runTask = transcriptRunner((_t) => `still working ${++iter}`);
+	const deps: RuntimeDeps = { cwd: "/tmp", agents: AGENTS, runTask, transcriptDir: dir, persist: () => {}, onProgress: () => {} };
+	try {
+		const res = await executeTaskflow(mkState(def), deps);
+		assert.equal(res.ok, true);
+		assert.deepEqual(fs.readdirSync(dir).sort(), ["l-iter-1.ndjson", "l-iter-2.ndjson"]);
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("runtime: each race branch gets its own transcript file", async () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tf-transcript-"));
+	const def: Taskflow = {
+		name: "race-transcript",
+		phases: [
+			{ id: "r", type: "race", agent: "a", branches: [{ task: "left" }, { task: "right" }], final: true },
+		],
+	};
+	const runTask = transcriptRunner((t) => `did:${t}`);
+	const deps: RuntimeDeps = { cwd: "/tmp", agents: AGENTS, runTask, transcriptDir: dir, persist: () => {}, onProgress: () => {} };
+	try {
+		const res = await executeTaskflow(mkState(def), deps);
+		assert.equal(res.ok, true);
+		assert.deepEqual(fs.readdirSync(dir).sort(), ["r-branch-0.ndjson", "r-branch-1.ndjson"]);
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("runtime: a retried phase's transcript records one attempt marker", async () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tf-transcript-"));
+	let calls = 0;
+	const def: Taskflow = {
+		name: "retry-transcript",
+		phases: [
+			{ id: "one", type: "agent", agent: "a", task: "start", final: true, retry: { max: 1, backoffMs: 0 } },
+		],
+	};
+	const runTask: RuntimeDeps["runTask"] = async (_cwd, _agents, agentName, task) => {
+		calls++;
+		const failed = calls === 1;
+		return {
+			agent: agentName,
+			task,
+			exitCode: failed ? 1 : 0,
+			output: failed ? "" : "ok",
+			stderr: failed ? "boom" : "",
+			usage: emptyUsage(),
+			stopReason: failed ? "error" : "end",
+			errorMessage: failed ? "boom" : undefined,
+		};
+	};
+	const deps: RuntimeDeps = { cwd: "/tmp", agents: AGENTS, runTask, transcriptDir: dir, persist: () => {}, onProgress: () => {} };
+	const res = await executeTaskflow(mkState(def), deps);
+	assert.equal(res.ok, true);
+	assert.equal(calls, 2, "expected exactly one retry");
+	const file = path.join(dir, "one.ndjson");
+	const lines = fs.readFileSync(file, "utf-8").trim().split("\n").filter(Boolean);
+	const markers = lines.map((l) => JSON.parse(l)).filter((e) => e.type === "taskflow_attempt");
+	assert.equal(markers.length, 1, `expected one attempt marker, got: ${JSON.stringify(lines)}`);
+	assert.equal(markers[0].attempt, 2);
+	assert.equal(typeof markers[0].at, "number");
+});

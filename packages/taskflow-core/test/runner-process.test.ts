@@ -633,6 +633,31 @@ test("runSubagentProcess: fatalError in the accumulator wins as error", async ()
 	assert.equal(r.errorMessage, "synthetic fatal");
 });
 
+test("runSubagentProcess: onRawLine receives each complete stdout line", async () => {
+	const seen: string[] = [];
+	const r = await runSubagentProcess({
+		agent: "test", task: "t", model: undefined,
+		bin: "node", args: ["-e", `process.stdout.write(JSON.stringify({a:1})+"\\n"+JSON.stringify({b:2})+"\\n");`], cwd: process.cwd(),
+		acc: makeAcc(), foldLine,
+		onRawLine: (line) => { seen.push(line); },
+	});
+	assert.equal(r.exitCode, 0);
+	assert.deepEqual(seen, [JSON.stringify({ a: 1 }), JSON.stringify({ b: 2 })]);
+});
+
+test("runSubagentProcess: a throwing onRawLine sink is caught once and disabled, run still succeeds", async () => {
+	let calls = 0;
+	const r = await runSubagentProcess({
+		agent: "test", task: "t", model: undefined,
+		bin: "node", args: ["-e", `process.stdout.write(JSON.stringify({a:1})+"\\n"+JSON.stringify({b:2})+"\\n");`], cwd: process.cwd(),
+		acc: makeAcc(), foldLine,
+		onRawLine: () => { calls++; throw new Error("sink boom"); },
+	});
+	assert.equal(r.exitCode, 0, "a throwing onRawLine must not fail the run");
+	assert.equal(r.stopReason, "end");
+	assert.equal(calls, 1, "the sink must be disabled after its first throw");
+});
+
 test("unknownAgentResult: lists available agents + classifies as error", () => {
 	const agents: AgentConfig[] = [
 		{ name: "executor", description: "", systemPrompt: "", source: "user", filePath: "" },

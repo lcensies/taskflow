@@ -1,0 +1,5 @@
+{"type":"taskflow_attempt","attempt":1,"at":1000}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Looking into it"}]}}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"toolCall","name":"bash","arguments":{"command":"ls -la"}}]}}
+{"type":"message_end","message":{"role":"user","content":[{"type":"toolResult","name":"bash","text":"file1.txt\nfile2.txt","isError":false}]}}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"trunc

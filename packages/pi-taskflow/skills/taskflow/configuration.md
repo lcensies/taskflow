@@ -346,7 +346,7 @@ Taskflow shares the subagent settings file at `~/.pi/agent/settings.json`:
   },
 	"taskflow": {
 		"steering": true,                      // mid-run steering from the inspector
-		"inspectorShortcut": "ctrl+alt+t",      // opens the live inspector
+		"inspectorShortcut": "alt+t",           // opens the live inspector
 		"piChild": {
 			"resourceProfile": "isolated",       // isolated | allowlist | inherit
 			"extensions": [],                    // absolute trusted paths; allowlist only
@@ -381,9 +381,12 @@ Taskflow shares the subagent settings file at `~/.pi/agent/settings.json`:
   open the channel. Steering loads Taskflow's own extension into each child (the
   same injection context sharing already uses), so it survives
   `resourceProfile: "isolated"`.
-- `taskflow.inspectorShortcut` (default `ctrl+alt+t`) rebinds the live inspector.
+- `taskflow.inspectorShortcut` (default `alt+t`) rebinds the live inspector.
   An invalid or conflicting key is reported at startup and leaves the rest of
-  the extension working.
+  the extension working. Prefer `alt+<letter>` or a function key: `ctrl+alt+<letter>`
+  needs the Kitty keyboard protocol end to end (in tmux, `extended-keys on`), and
+  desktop environments grab some of those combos before the terminal sees them
+  (GNOME binds `Ctrl+Alt+T` to "open terminal").
 
 ---
 
