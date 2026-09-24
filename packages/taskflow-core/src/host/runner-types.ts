@@ -114,6 +114,13 @@ export interface RunOptions {
 	 * capability ignores it (fail-open: steering is simply unavailable).
 	 */
 	steerFile?: string;
+	/**
+	 * Transcript recording (opt-in). When set, the host should append this
+	 * node's raw output lines (and runtime-emitted markers, e.g. retry attempt
+	 * boundaries) to this file. A host without that capability ignores it
+	 * (fail-open: transcript capture is simply unavailable).
+	 */
+	transcriptFile?: string;
 	/** @internal Host-to-runtime linearization hook. Process runners call this
 	 * synchronously when a terminal candidate is irreversibly committed, before
 	 * sending reap signals. Flow data cannot provide this callback. */

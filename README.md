@@ -174,7 +174,7 @@ The MCP surface currently exposes **20 tools**. Intermediate transcripts remain 
 
 The same flow contract can be delivered through six coding-agent hosts:
 
-- **Pi** — native extension, `/tf` commands, live run views, interactive approvals, and a live inspector (`Ctrl+Alt+T`) that reaches a run mid-flight to read a phase's recent activity or steer its subagent.
+- **Pi** — native extension, `/tf` commands, live run views, interactive approvals, and a live inspector (`Alt+T`) that reaches a run mid-flight. Navigation is a level stack — `phases` (every phase, windowed) → `agents` (a fan-out phase's items; skipped for single-subagent phases) → `detail` (one node's transcript, falling back to its output section then live activity) — with a shared key map (`↑↓/jk` move, `PgUp/PgDn` page, `Home/End` top/bottom, `Enter/→/l` in, `Esc/←/h` back, `q` close) and `s` to steer the owning phase from any level.
 - **Codex** — plugin and stdio MCP server.
 - **Claude Code** — plugin and stdio MCP server.
 - **OpenCode** — MCP configuration and generated skill.

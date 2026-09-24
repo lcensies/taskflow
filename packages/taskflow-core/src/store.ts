@@ -389,6 +389,22 @@ export function traceFilePath(runsRoot: string, flowName: string, runId: string)
 	return path.join(flowRunDir(runsRoot, flowName), `${runId}.trace.jsonl`);
 }
 
+/** Return the per-run transcript directory: sibling of `<runId>.json` in the
+ *  same per-flow dir. One `.ndjson` file per run node lives inside. */
+export function transcriptDirFor(runsRoot: string, flowName: string, runId: string): string {
+	return path.join(flowRunDir(runsRoot, flowName), runId);
+}
+
+/** Return a node's transcript file path inside its run's transcript dir.
+ *  `nodeId` is sanitized with the same rule the runtime uses to build node ids
+ *  (and `steerFileFor` uses), so writers and readers agree on the path for a
+ *  phase id that contains separators like `review:api`. */
+export function transcriptFileFor(dir: string, nodeId: string): string {
+	const safe = nodeId.replace(/[^A-Za-z0-9._-]+/g, "_");
+	if (!safe || safe === "." || safe === "..") throw new Error(`Unsafe nodeId for transcript file: ${nodeId}`);
+	return path.join(dir, `${safe}.ndjson`);
+}
+
 /** Return the path to the run index file. */
 function indexPath(runsRoot: string): string {
 	return path.join(runsRoot, "index.json");
@@ -1009,6 +1025,8 @@ function cleanupRunArtifactsIfSnapshotMatches(runsRoot: string, entry: RunIndexE
 					CLEANUP_LOCK_TIMEOUT_MS,
 				);
 			} catch { /* best effort */ }
+			// Remove per-run transcript directory alongside the trace file.
+			removeArtifactDirectoryInsideRunsRoot(runsRoot, transcriptDirFor(runsRoot, entry.flowName, entry.runId));
 			// Remove per-run Shared Context Tree and isolated-workspace artifacts.
 			removeArtifactDirectoryInsideRunsRoot(runsRoot, path.join(runsRoot, "ctx", entry.runId));
 			const wsSeg = entry.runId.replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+/, "_").slice(0, 100) || "phase";
@@ -2039,6 +2057,22 @@ export function loadRunDiagnosed(cwd: string, runId: string): LoadResult<RunStat
 export function loadRun(cwd: string, runId: string): RunState | null {
 	const r = loadRunDiagnosed(cwd, runId);
 	return r.ok ? r.value : null;
+}
+
+/** List the node ids (phases, fan-out items, judges, ...) that have a
+ *  transcript file for the given run. Empty when the run is unknown or has
+ *  no transcript directory yet. */
+export function listTranscripts(cwd: string, runId: string): string[] {
+	const state = loadRun(cwd, runId);
+	if (!state) return [];
+	const dir = transcriptDirFor(runsDir(cwd), state.flowName, runId);
+	try {
+		return fs.readdirSync(dir)
+			.filter((f) => f.endsWith(".ndjson"))
+			.map((f) => f.slice(0, -".ndjson".length));
+	} catch {
+		return [];
+	}
 }
 
 /**

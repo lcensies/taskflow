@@ -237,7 +237,7 @@ function describeActivity(msg: CoreMessage): string {
 	return chosen.replace(/[ \t\n\r]+/g, " ").trim();
 }
 
-function summarizeToolCall(name: string, args: Record<string, unknown>): string {
+export function summarizeToolCall(name: string, args: Record<string, unknown>): string {
 	const short = (p: unknown) => {
 		const s = String(p ?? "");
 		return s.length > 48 ? `${s.slice(0, 48)}…` : s;
@@ -496,6 +496,12 @@ export interface RunSubagentProcessOptions<TAcc extends SubagentAccumulator> {
 	terminationGraceMs?: number;
 	signal?: AbortSignal;
 	onLive?: (live: LiveUpdate) => void;
+	/** Raw-line observer, invoked for every complete stdout line (after the
+	 * oversized-line size guard) before it is handed to `foldLine`. Used to tee
+	 * the untouched event stream (e.g. transcript persistence) without altering
+	 * fold/completion semantics. A throwing sink is caught once, then
+	 * permanently disabled for the rest of this run — never fails the run. */
+	onRawLine?: (line: string) => void;
 	/** Bounded host-specific metadata observer. Receives raw stderr chunks before
 	 * the shared 64KB retained-diagnostic cap; exceptions are ignored. */
 	observeStderr?: (data: Buffer) => void;
@@ -592,6 +598,7 @@ export async function runSubagentProcess<TAcc extends SubagentAccumulator>(
 
 		let buffer = "";
 		let discardingOversizedLine = false;
+		let rawLineSinkDisabled = false;
 		const stdoutDecoder = new StringDecoder("utf8");
 		const stderrDecoder = new StringDecoder("utf8");
 		let idleTimer: NodeJS.Timeout | undefined;
@@ -737,6 +744,9 @@ export async function runSubagentProcess<TAcc extends SubagentAccumulator>(
 			terminalTimer.unref();
 		};
 		const processLine = (line: string) => {
+			if (opts.onRawLine && !rawLineSinkDisabled) {
+				try { opts.onRawLine(line); } catch { rawLineSinkDisabled = true; }
+			}
 			if (protocolError || (opts.stdoutFormat !== "text" && !line.trim())) return;
 			// Default hosts advertise a JSON/NDJSON stream. Treat malformed records
 			// as a protocol failure: silently dropping them can turn a truncated

@@ -32,7 +32,14 @@ import { createPiSubagentRunner, PI_TASKFLOW_PI_ENTRY_ENV, resolveParentPiCliEnt
 import { RunHistoryComponent, type RunHistoryResult } from "./runs-view.ts";
 import { InspectorComponent, type InspectorResult } from "./inspector-view.ts";
 import { clearActiveRun, getActiveRun, setActiveRun } from "./active-run.ts";
-import { appendSteerMessage, jsRuntimeExecPath, steerDirFor, steerFileFor } from "taskflow-core";
+import {
+	appendSteerMessage,
+	jsRuntimeExecPath,
+	steerDirFor,
+	steerFileFor,
+	transcriptDirFor,
+	transcriptFileFor,
+} from "taskflow-core";
 import { startSteerWatcher } from "./steer-watch.ts";
 import { ApprovalViewComponent, type ApprovalChoice } from "./approval-view.ts";
 import {
@@ -620,6 +627,9 @@ async function runFlow(
 		const result = await executeTaskflow(state, {
 			cwd: ctx.cwd,
 			steerDir,
+			// Per-node subagent transcripts. Always on (headless included) so
+			// `/tf peek --transcript` works without a UI; cleaned up with the run.
+			transcriptDir: transcriptDirFor(runsDir(ctx.cwd), state.flowName, state.runId),
 			cwdBridgeMode: cwdBridgeModeFromEnv(),
 			agents,
 			globalThinking: settings.globalThinking,
@@ -684,11 +694,22 @@ async function openRunHistory(pi: ExtensionAPI, ctx: ViewCtx): Promise<void> {
 		return;
 	}
 	const result = await ctx.ui.custom<RunHistoryResult | undefined>((tui, theme, _kb, done) =>
-		new RunHistoryComponent(runs, theme, (r) => done(r), {
-			refresh: () => listRuns(ctx.cwd, 50),
-			requestRender: () => tui.requestRender(),
-			intervalMs: 1000,
-		}),
+		new RunHistoryComponent(
+			runs,
+			theme,
+			(r) => done(r),
+			{
+				refresh: () => listRuns(ctx.cwd, 50),
+				requestRender: () => tui.requestRender(),
+				intervalMs: 1000,
+			},
+			{
+				transcriptFile: (run, nodeId) =>
+					transcriptFileFor(transcriptDirFor(runsDir(ctx.cwd), run.flowName, run.runId), nodeId),
+				rows: () => tui.terminal.rows,
+			},
+		),
+		{ overlay: true, overlayOptions: { width: "90%", maxHeight: "90%", margin: 1 } },
 	);
 	if (result?.action === "resume") {
 		if (ctx.isIdle()) {
@@ -710,7 +731,7 @@ export function steerNodeIds(state: RunState, phaseId: string): string[] {
 	return ids;
 }
 
-/** The live inspector (default `ctrl+alt+t`). Falls back to stored runs. */
+/** The live inspector (default `alt+t`). Falls back to stored runs. */
 async function openInspector(pi: ExtensionAPI, ctx: ViewCtx): Promise<void> {
 	const active = getActiveRun();
 	if (!active) {
@@ -722,6 +743,7 @@ async function openInspector(pi: ExtensionAPI, ctx: ViewCtx): Promise<void> {
 		return;
 	}
 	// Loop: steering closes the overlay to collect text, then reopens it.
+	const transcriptDir = transcriptDirFor(runsDir(ctx.cwd), active.state.flowName, active.state.runId);
 	for (;;) {
 		const result = await ctx.ui.custom<InspectorResult | undefined>((tui, theme, _kb, done) =>
 			new InspectorComponent(
@@ -730,7 +752,10 @@ async function openInspector(pi: ExtensionAPI, ctx: ViewCtx): Promise<void> {
 				(r) => done(r),
 				Boolean(active.steerDir),
 				() => tui.requestRender(),
+				() => tui.terminal.rows,
+				(nodeId) => transcriptFileFor(transcriptDir, nodeId),
 			),
+			{ overlay: true, overlayOptions: { width: "90%", maxHeight: "90%", margin: 1 } },
 		);
 		if (result?.action !== "steer" || !active.steerDir) return;
 		const text = await ctx.ui.input(`Steer ${result.phaseId}`, "message for the subagent…");
@@ -2220,7 +2245,7 @@ export default function (pi: ExtensionAPI) {
 
 			if (sub === "peek") {
 				const tokens = (arg ?? "").trim().split(/\s+/).filter(Boolean);
-				const flags = { json: false, item: undefined as number | undefined, limit: undefined as number | undefined };
+				const flags = { json: false, transcript: false, item: undefined as number | undefined, limit: undefined as number | undefined };
 				const positional: string[] = [];
 				let flagError: string | undefined;
 				const numFlag = (name: string, raw: string | undefined): number | undefined => {
@@ -2234,20 +2259,21 @@ export default function (pi: ExtensionAPI) {
 				for (let i = 0; i < tokens.length; i++) {
 					const t = tokens[i];
 					if (t === "--json") flags.json = true;
+					else if (t === "--transcript") flags.transcript = true;
 					else if (t === "--item") flags.item = numFlag("--item", tokens[++i]);
 					else if (t === "--limit") flags.limit = numFlag("--limit", tokens[++i]);
 					else positional.push(t);
 				}
 				if (flagError) {
-					ctx.ui.notify(`Usage: /tf peek <runId> [phaseId] [--json] [--item <n>] [--limit <chars>] — ${flagError}`, "warning");
+					ctx.ui.notify(`Usage: /tf peek <runId> [phaseId] [--json] [--transcript] [--item <n>] [--limit <chars>] — ${flagError}`, "warning");
 					return;
 				}
 				const [runId, phaseId] = positional;
 				if (!runId) {
-					ctx.ui.notify("Usage: /tf peek <runId> [phaseId] [--json] [--item <n>] [--limit <chars>]", "warning");
+					ctx.ui.notify("Usage: /tf peek <runId> [phaseId] [--json] [--transcript] [--item <n>] [--limit <chars>]", "warning");
 					return;
 				}
-				const res = peekRun(ctx.cwd, runId, { phaseId, json: flags.json, item: flags.item, limit: flags.limit });
+				const res = peekRun(ctx.cwd, runId, { phaseId, json: flags.json, transcript: flags.transcript, item: flags.item, limit: flags.limit });
 				ctx.ui.notify(res.text, res.ok ? "info" : "error");
 				return;
 			}

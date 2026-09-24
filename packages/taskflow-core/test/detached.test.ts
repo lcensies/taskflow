@@ -10,8 +10,11 @@ import {
 	loadRun,
 	newRunId,
 	type RunState,
+	runsDir,
 	saveFlow,
 	saveRun,
+	transcriptDirFor,
+	transcriptFileFor,
 } from "../src/store.ts";
 
 // ---------------------------------------------------------------------------
@@ -190,6 +193,74 @@ saveRun(state);
 		try { fs.unlinkSync(mockRunnerPath); } catch { /* ignore */ }
 		try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
 	} finally {
+		cleanup(cwd);
+	}
+});
+
+// ---------------------------------------------------------------------------
+// Detached runner: per-node transcripts
+// ---------------------------------------------------------------------------
+
+test("detached-runner: records a per-node transcript under the run's transcript dir", async () => {
+	const cwd = makeTmpCwd();
+	const ctxDir = fs.mkdtempSync(path.join(os.tmpdir(), "taskflow-detach-"));
+	try {
+		const state = mkRunState(cwd, { flowName: "detach-transcript", status: "running", detached: true });
+		saveRun(state);
+
+		// A fake host runner: it only records that the runtime handed it a
+		// transcriptFile, which is exactly the deps wiring under test.
+		const runnerPath = path.join(cwd, "fake-runner.mts");
+		fs.writeFileSync(runnerPath, `
+import { appendFileSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import { emptyUsage } from "${pathToFileURL(path.resolve("packages/taskflow-core/src/usage.ts")).href}";
+
+export const piSubagentRunner = {
+	usageAccounting: "available",
+	async runTask(_cwd, _agents, agentName, task, opts) {
+		if (opts.transcriptFile) {
+			mkdirSync(dirname(opts.transcriptFile), { recursive: true });
+			appendFileSync(opts.transcriptFile, JSON.stringify({ type: "agent_end" }) + "\\n");
+		}
+		return { agent: agentName, task, exitCode: 0, output: "ok", stderr: "", usage: emptyUsage(), stopReason: "end" };
+	},
+};
+`);
+
+		fs.writeFileSync(path.join(ctxDir, "context.json"), JSON.stringify({
+			runId: state.runId,
+			defName: state.flowName,
+			args: {},
+			cwd,
+			runnerModule: pathToFileURL(runnerPath).href,
+			runnerExport: "piSubagentRunner",
+			agents: [{ name: "a", description: "test agent", systemPrompt: "", source: "user", filePath: "" }],
+		}));
+
+		const { spawn } = await import("node:child_process");
+		const child = spawn(
+			process.execPath,
+			[
+				"--experimental-strip-types",
+				"--no-warnings",
+				path.resolve("packages/taskflow-core/src/detached-runner.ts"),
+				path.join(ctxDir, "context.json"),
+			],
+			{ stdio: ["ignore", "ignore", "pipe"], env: { ...process.env, PI_TASKFLOW_BUILTIN_AGENTS_DIR: "" } },
+		);
+		let stderr = "";
+		child.stderr.on("data", (c) => { stderr += String(c); });
+		const code: number | null = await new Promise((r) => child.on("exit", r));
+		assert.equal(code, 0, `detached runner failed: ${stderr}`);
+
+		const done = loadRun(cwd, state.runId);
+		assert.equal(done?.status, "completed", `unexpected status; stderr: ${stderr}`);
+		const file = transcriptFileFor(transcriptDirFor(runsDir(cwd), state.flowName, state.runId), "p1");
+		assert.ok(fs.existsSync(file), `expected a transcript at ${file}`);
+		assert.match(fs.readFileSync(file, "utf-8"), /agent_end/);
+	} finally {
+		fs.rmSync(ctxDir, { recursive: true, force: true });
 		cleanup(cwd);
 	}
 });

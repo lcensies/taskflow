@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { renderProgress, renderRunningActivity, summarizeRun } from "../src/render.ts";
+import { visibleWidth } from "@earendil-works/pi-tui";
+import { renderFingerprint, renderProgress, renderRunningActivity, summarizeRun } from "../src/render.ts";
 import { emptyUsage } from "taskflow-core";
 import type { Taskflow } from "taskflow-core";
 import type { PhaseState, RunState } from "taskflow-core";
@@ -200,4 +201,75 @@ test("renderRunningActivity: only running phases, most recent lines, empty when 
 
 	const idle = mkState(def, { a: done("a"), b: done("b") }, "completed");
 	assert.equal(renderRunningActivity(idle, theme), "", "nothing running → no activity block");
+});
+
+test("renderProgress: every line stays within a given width even with a 12-dep phase and long liveText", () => {
+	const deps = Array.from({ length: 12 }, (_, i) => `d${i}`);
+	const def: Taskflow = {
+		name: "wide",
+		phases: [
+			...deps.map((id) => ({ id, type: "agent" as const, task: "t" })),
+			{ id: "running", type: "agent", task: "t", dependsOn: deps },
+			{ id: "collector", type: "reduce", from: deps.concat("running"), task: "t", dependsOn: deps.concat("running"), final: true },
+		],
+	};
+	const phases: Record<string, PhaseState> = Object.fromEntries(deps.map((id) => [id, done(id)]));
+	phases.running = {
+		id: "running",
+		status: "running",
+		startedAt: Date.now(),
+		usage: emptyUsage(),
+		liveText: "x".repeat(90),
+	};
+	const state = mkState(def, phases);
+	const out = renderProgress(state, theme, { width: 40 });
+	for (const line of out.split("\n")) {
+		assert.ok(visibleWidth(line) <= 40, `line exceeds 40 cols: "${line}" (${visibleWidth(line)})`);
+	}
+});
+
+test("renderProgress: collapsed mode caps a 30-phase run at 14 rows", () => {
+	const ids = Array.from({ length: 30 }, (_, i) => `p${i}`);
+	const def: Taskflow = { name: "many", phases: ids.map((id) => ({ id, type: "agent", task: "t" })) };
+	const phases: Record<string, PhaseState> = Object.fromEntries(ids.map((id) => [id, done(id)]));
+	phases.p5 = { id: "p5", status: "failed", usage: emptyUsage(), error: "boom" };
+	phases.p15 = { id: "p15", status: "running", startedAt: Date.now(), usage: emptyUsage() };
+	const state = mkState(def, phases);
+	const lines = renderProgress(state, theme, { maxRows: 14 }).split("\n");
+	assert.ok(lines.length <= 14, `expected ≤14 rows, got ${lines.length}:\n${lines.join("\n")}`);
+	assert.ok(lines.some((l) => l.includes("done") && l.includes("pending")), "folded rows should summarize done/pending counts");
+});
+
+test("renderProgress: two renders 100ms apart of an unchanged state differ only in the last line", async () => {
+	const def: Taskflow = {
+		name: "stable",
+		phases: [
+			{ id: "a", type: "agent", task: "t" },
+			{ id: "b", type: "agent", task: "t", dependsOn: ["a"], final: true },
+		],
+	};
+	// No phase is individually "running" so no row depends on wall-clock time —
+	// only the footer (overall spinner/elapsed) is time-based.
+	const state = mkState(def, { a: done("a"), b: { id: "b", status: "pending", usage: emptyUsage() } }, "running");
+	const first = renderProgress(state, theme).split("\n");
+	await new Promise((r) => setTimeout(r, 100));
+	const second = renderProgress(state, theme).split("\n");
+	assert.equal(first.length, second.length);
+	assert.deepEqual(first.slice(0, -1), second.slice(0, -1), "only the footer (last) line may change over time");
+});
+
+test("renderProgress: a labelled phase shows its label instead of its id", () => {
+	const def: Taskflow = {
+		name: "labelled",
+		phases: [{ id: "t1-2", type: "agent", task: "t", label: "1.2 Add CSV formatting utilities", final: true }],
+	};
+	const state = mkState(def, { "t1-2": done("t1-2") });
+	const out = renderProgress(state, theme);
+	assert.match(out, /1\.2 Add CSV formatting utilities/);
+});
+
+test("renderFingerprint: stable for an unchanged state within the same second", () => {
+	const def: Taskflow = { name: "x", phases: [{ id: "p", type: "agent", task: "t", final: true }] };
+	const state = mkState(def, { p: done("p") }, "completed");
+	assert.equal(renderFingerprint(state), renderFingerprint(state));
 });

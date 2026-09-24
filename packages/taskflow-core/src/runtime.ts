@@ -47,7 +47,7 @@ import { type TraceEvent, type TraceSink } from "./trace.ts";
 export { parseGateVerdict };
 import { runCodeCompilesScorer } from "./scorer-runtime.ts";
 import { buildReflexionSummary, isContractViolation, REFLEXION_SENTINEL, type ReflexionInput } from "./reflexion.ts";
-import { hashInput, newRunId, type PhaseState, type RunState, runsDir } from "./store.ts";
+import { hashInput, newRunId, type PhaseState, type RunState, runsDir, transcriptFileFor } from "./store.ts";
 import { resolveFinalOutput } from "./final-output.ts";
 import { CacheStore, resolveFingerprint } from "./cache.ts";
 import { compileTaskflowToIR, phaseFingerprint } from "./flowir/index.ts";
@@ -108,6 +108,10 @@ export interface RuntimeDeps {
 	/** Steering root for this run (see steer.ts). When set, every subagent call
 	 *  gets a per-node steer file so the host can deliver messages mid-run. */
 	steerDir?: string;
+	/** Per-run transcript directory (see store.ts transcriptDirFor). When set,
+	 *  every subagent call — phases, map/parallel items, tournament variants and
+	 *  judges — gets its own node transcript file. */
+	transcriptDir?: string;
 	/** Injectable task runner (defaults to spawning a real subagent). Enables testing. */
 	runTask?: RunTaskFn;
 	/** Resolve an `approval` phase. Omit for non-interactive runs (auto-reject). */
@@ -370,6 +374,19 @@ function warnUnresolvedRefs(phaseId: string, missing: string[]): string | undefi
 function attemptsOf(r: RunResult): number {
 	const a = r.attempts;
 	return typeof a === "number" && a > 0 ? a : 1;
+}
+
+/** Fail-open transcript marker: appends a retry-attempt boundary line to a
+ *  node's transcript file so a post-hoc reader can tell where a retry began.
+ *  Never throws — a missing/unwritable transcript dir must not break a run. */
+function appendAttemptMarker(file: string | undefined, attempt: number): void {
+	if (!file) return;
+	try {
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.appendFileSync(file, `${JSON.stringify({ type: "taskflow_attempt", attempt, at: Date.now() })}\n`);
+	} catch {
+		/* transcript capture is best-effort; never run-breaking */
+	}
 }
 
 /** Cancellable delay used between retry attempts. */
@@ -1750,6 +1767,8 @@ async function executePhaseInner(
 			// getting ctx_* tools).
 			steerFile:
 				deps.steerDir && ctxNodeId ? steerFileFor(deps.steerDir, ctxNodeId) : undefined,
+			transcriptFile:
+				deps.transcriptDir && ctxNodeId ? transcriptFileFor(deps.transcriptDir, ctxNodeId) : undefined,
 			idleTimeoutMs: effIdleTimeoutMs,
 			onTerminalCommit,
 		};
@@ -1869,6 +1888,9 @@ async function executePhaseInner(
 						timer = undefined;
 					}
 				};
+				if (attempt > 0 && deps.transcriptDir && ctxNodeId) {
+					appendAttemptMarker(transcriptFileFor(deps.transcriptDir, ctxNodeId), attempt + 1);
+				}
 				const invocation = baseRun(agentName, task, onLive, ctxNodeId, callSignal, callCwd, onTerminalCommit);
 				if (phaseTimeoutMs && timeoutController) {
 					const timeoutFallback = new Promise<RunResult>((resolve) => {
@@ -2694,7 +2716,7 @@ async function executePhaseInner(
 				const retryText = interpolate(phase.task ?? "", retryCtx).text;
 				const retryTask = appendGateFormatSuffix(preRead + retryText, phase);
 				const retryIH = cacheKeys(cc, [phase.id, agentName, phase.model ?? "", retryTask]).key;
-				const retryR = await runOne(agentName, retryTask, liveSink(state, phase.id, emitProgress), undefined, contractCheck);
+				const retryR = await runOne(agentName, retryTask, liveSink(state, phase.id, emitProgress), nodeIdFor(), contractCheck);
 				gatePs = resultToPhaseState(phase.id, retryR, retryIH, parseJson);
 				if (gatePs.status === "done") gatePs.gate = parseGateVerdict(retryR.output);
 				if (gatePs.gate?.verdict !== "block" || overBudget(state).over) break;
@@ -2837,8 +2859,8 @@ async function executePhaseInner(
 		const inputHash = ck.key;
 		const cached = cachedPhase(cc, ck);
 		if (cached) return cached;
-		const raceRunOne = (agent: string, task: string, branchSignal?: AbortSignal) =>
-			runOne(agent, task, undefined, undefined, undefined, branchSignal);
+		const raceRunOne = (agent: string, task: string, branchSignal?: AbortSignal, idx?: number) =>
+			runOne(agent, task, undefined, nodeIdFor(`branch-${idx ?? 0}`), undefined, branchSignal);
 		const ps = await executeRaceBranches(phase, branches, raceRunOne, isFailed, {
 			inputHash,
 			parseJson,
@@ -3395,7 +3417,7 @@ async function executePhaseInner(
 					loopWarnings.push("reflexion: true but the task has no {reflexion} placeholder — the summary was auto-appended; add {reflexion} to control placement");
 				}
 			}
-			const r = await runOne(agentName, body, liveSink(state, phase.id, emitProgress), undefined, contractCheck);
+			const r = await runOne(agentName, body, liveSink(state, phase.id, emitProgress), nodeIdFor(`iter-${i}`), contractCheck);
 			usages.push(r.usage);
 			// Fold cumulative loop spend into the live phase state so the run-level
 			// budget guard (overBudget reads state.phases[*].usage) sees the loop's
@@ -3612,7 +3634,7 @@ async function executePhaseInner(
 				: `Synthesize the strongest possible answer by combining the best parts of the eligible variants. Then end with a line: WINNER: <number> indicating which variant contributed most.`;
 		const judgeTask = `${finalRubric}\n\nThe candidate variants:\n\n${labelled}\n\n${directive}`;
 		const judgeAgent = resolveAgent(phase.judgeAgent ?? phase.agent, deps, state);
-		const judgeRes = await runOne(judgeAgent, judgeTask, liveSink(state, phase.id, emitProgress));
+		const judgeRes = await runOne(judgeAgent, judgeTask, liveSink(state, phase.id, emitProgress), nodeIdFor("judge"));
 		const judgeUsage = aggregateUsage([variantUsage, judgeRes.usage]);
 
 		if (isFailed(judgeRes)) {

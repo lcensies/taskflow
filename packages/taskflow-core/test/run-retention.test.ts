@@ -264,6 +264,44 @@ test("retention: cleanup rechecks a candidate under its run lock", async () => {
 	}
 });
 
+test("retention: cleanup removes a run's transcript directory", async () => {
+	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "taskflow-retention-transcript-"));
+	fs.mkdirSync(path.join(cwd, ".pi"));
+	try {
+		const store = await import(`../src/store.ts?retention-transcript=${Date.now()}`) as typeof import("../src/store.ts");
+		store.saveRun(state(cwd, "victim", "failed"), { maxKeep: 0, maxAgeDays: 0 });
+
+		const root = store.runsDir(cwd);
+		const indexFile = path.join(root, "index.json");
+		const entries = JSON.parse(fs.readFileSync(indexFile, "utf-8")) as Array<{
+			runId: string;
+			updatedAt: number;
+			relPath: string;
+		}>;
+		const entry = entries.find((candidate) => candidate.runId === "victim");
+		assert.ok(entry);
+		const runFile = path.join(root, ...entry.relPath.split("/"));
+		const persisted = JSON.parse(fs.readFileSync(runFile, "utf-8")) as RunState;
+		persisted.updatedAt = 1;
+		entry.updatedAt = 1;
+		fs.writeFileSync(runFile, JSON.stringify(persisted));
+		fs.writeFileSync(indexFile, JSON.stringify(entries));
+
+		const transcriptDir = store.transcriptDirFor(root, flow.name, "victim");
+		fs.mkdirSync(transcriptDir, { recursive: true });
+		fs.writeFileSync(store.transcriptFileFor(transcriptDir, "done"), '{"type":"text"}\n');
+		assert.deepEqual(store.listTranscripts(cwd, "victim"), ["done"]);
+
+		const cleanup = await import(`../src/store.ts?retention-transcript-cleanup=${Date.now()}`) as typeof import("../src/store.ts");
+		cleanup.saveRun(state(cwd, "trigger", "running"), { maxKeep: 1, maxAgeDays: 1 });
+
+		assert.equal(fs.existsSync(transcriptDir), false, "transcript directory removed alongside cleanup");
+		assert.deepEqual(cleanup.listTranscripts(cwd, "victim"), []);
+	} finally {
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("run index: list does not follow a run-file symlink outside the runs root", async (t) => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "taskflow-index-symlink-"));
 	fs.mkdirSync(path.join(cwd, ".pi"));

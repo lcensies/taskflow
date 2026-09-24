@@ -168,6 +168,11 @@ const PhaseSchema = Type.Object(
 	{
 		id: Type.String({ description: "Unique phase identifier (referenced via {steps.<id>.output})" }),
 		type: Type.Optional(StringEnum(PHASE_TYPES, { description: "Phase kind", default: "agent" })),
+		/** Purely cosmetic display name (renderers/peek fall back to `id`). Never
+		 *  folded into any cache key or content hash — see phasefp.ts PHASE_FP_STRIP. */
+		label: Type.Optional(
+			Type.String({ description: "Human-readable display label (1-120 chars, no newline). Falls back to 'id' in renderers/peek. Does not affect caching or execution." }),
+		),
 		agent: Type.Optional(Type.String({ description: "Agent name to run this phase" })),
 		task: Type.Optional(Type.String({ description: "Task prompt (supports interpolation placeholders)" })),
 		taskFile: Type.Optional(
@@ -1148,6 +1153,14 @@ export function validateTaskflow(def: unknown, opts: ValidationOptions = {}): Va
 			const v = (p as Record<string, unknown>)[key];
 			if (v !== undefined && typeof v !== "string") {
 				errors.push(`Phase '${p.id}': '${key}' must be a string, got ${typeof v}`);
+			}
+		}
+		// label is purely cosmetic (renderers/peek fall back to id); it never
+		// participates in any cache key or content hash (phasefp.ts strips it).
+		if ((p as { label?: unknown }).label !== undefined) {
+			const label = (p as { label?: unknown }).label;
+			if (typeof label !== "string" || label.length < 1 || label.length > 120 || label.includes("\n")) {
+				errors.push(`Phase '${p.id}': label must be a 1-120 character string with no newline`);
 			}
 		}
 		if (

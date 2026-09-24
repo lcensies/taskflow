@@ -27,7 +27,7 @@
 | 11 | 运行前审批：看 phase 列表 + **看 raw script** + 编辑 prompt 再跑 | 有 `approval` *phase*，但**无"运行前看全图并批准/改写"门** | ⚠️ 部分缺 |
 | 12 | **打开生成的 script 文件 → 读 → diff 上一版 → 编辑后 relaunch** | `RunState.def` 已落盘，但**没暴露给用户读/导出/编辑后重跑** | ❌ **缺 = A 能力核心** |
 | 13 | 后台运行（session 保持响应） | tool `execute()` 阻塞 | ❌ 缺（已立项，单独 H3） |
-| 14 | 进度面板：按 phase 看 agent 数/token/耗时，drill into 单 agent | 有 DAG 渲染，缺 per-agent drill-in 明细 | ⚠️ 部分缺 |
+| 14 | 进度面板：按 phase 看 agent 数/token/耗时，drill into 单 agent | Navigator TUI（`/tf runs`）四级 drill-in：run → phase → agent，含 token/耗时/transcript | ✅ 对等 |
 | 15 | 运行管理：pause/resume、stop 单 agent、restart 单 agent | 有 resume；缺运行中 pause / stop-single / restart-single | ⚠️ 部分缺 |
 
 ## 三、结论：真正的 gap 是「计划即可读可改写的 artifact」

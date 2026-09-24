@@ -22,6 +22,7 @@ import {
 	runsDir,
 	saveRun,
 	traceFilePath,
+	transcriptDirFor,
 	DEFAULT_KEPT_RUNS,
 	DEFAULT_RUN_AGE_DAYS,
 } from "./store.ts";
@@ -266,6 +267,9 @@ try {
 	process.env[DETACHED_CONTROL_SIGNAL_READY_ENV] = "1";
 	const deps: RuntimeDeps = {
 		cwd: ctx.cwd,
+		// Per-node subagent transcripts, same as the foreground path — a detached
+		// run must stay pollable with `peek --transcript`.
+		transcriptDir: transcriptDirFor(runsDir(ctx.cwd), state.flowName, state.runId),
 		cwdBridgeMode: cwdBridgeModeFromEnv(),
 		agents,
 		globalThinking: ctx.globalThinking ?? settings.globalThinking,

@@ -842,18 +842,39 @@ A run moves through: **running →** `completed` (a `final` phase produced outpu
   `--limit <chars>` (default 4000, max 32000). Read-only, human-invoked: the
   context-isolation contract still holds — peek is the debugging escape hatch
   when one phase of many produced garbage.
-- **Inspect a run WHILE it runs.** `Ctrl+Alt+T` (configurable:
-  `taskflow.inspectorShortcut`) opens the live inspector over the in-flight run —
-  phase list, then Enter for one phase's recent activity, partial output, model,
-  usage, and attempts. A shortcut is the only surface that works here: slash
-  input is queued while the taskflow tool holds the turn. With no run in flight
-  it opens the stored run history.
+- **Inspect a run WHILE it runs.** `Alt+T` (configurable:
+  `taskflow.inspectorShortcut`) opens the live inspector over the in-flight run.
+  A shortcut is the only surface that works here: slash input is queued while
+  the taskflow tool holds the turn. With no run in flight it opens the stored
+  run history instead (`/tf runs`, then Enter on a run reaches the same
+  inspector read-only).
+  Navigation is a level stack:
+  - **`phases`** — one row per phase of the run (badge, id, fan-out
+    `done/total`, steered marker), windowed to the viewport.
+  - **`agents`** — entering a fan-out phase (`map`/`parallel`) lists its
+    items, one row per subagent with its own status; a phase that ran a
+    single subagent skips this level and drills straight to `detail`.
+  - **`detail`** — one node's accounting header (model, tokens, attempts)
+    plus a scrollable pane over its transcript. Falls back to that item's
+    section of the merged output when no transcript file exists yet, then to
+    the in-memory activity/output block. By default tool results are capped
+    (long results truncated with a `… (+N lines)` marker) so the pane stays
+    skimmable. `Ctrl+O`, inside `detail`, toggles full transcript coverage:
+    tool results render uncapped and wrapped instead of truncated. The
+    footer hint (`^O full` / `^O compact`) shows the mode you'd switch to;
+    the toggle persists across leaving and re-entering `detail`.
+  Key map (same at every list level): `↑/k` `↓/j` move, `PgUp/ctrl+u`
+  `PgDn/ctrl+d` page, `Home/g` top, `End/G` bottom, `Enter/→/l` opens the next
+  level (or scrolls, inside `detail`), `Esc/←/h` pops back a level, `q/ctrl+c`
+  closes the panel.
 - **Steer a running subagent.** In the inspector, `s` sends a message to the
-  selected phase (every fan-out item of a map/parallel phase gets it). It is
-  delivered after the subagent's current tool calls, before its next model
-  call — a redirect, not an interrupt. A message sent to a phase that has not
-  started is folded into that phase's task. A steered phase is never reused from
-  the cross-run cache. Turn it off with `taskflow.steering: false`.
+  selected phase from any level — `phases`, `agents`, or `detail` all steer
+  the owning phase, never a single fan-out item (every item of a
+  map/parallel phase gets the message). It is delivered after the subagent's
+  current tool calls, before its next model call — a redirect, not an
+  interrupt. A message sent to a phase that has not started is folded into
+  that phase's task. A steered phase is never reused from the cross-run
+  cache. Turn it off with `taskflow.steering: false`.
 
 ## User commands
 

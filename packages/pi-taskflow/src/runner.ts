@@ -229,6 +229,65 @@ export function ctxExtensionPath(): string | undefined {
 	return undefined;
 }
 
+const TRANSCRIPT_MAX_BYTES = 16 * 1024 * 1024;
+
+/**
+ * Tee the child's raw stdout lines into `file` (append). Fail-open everywhere:
+ * an unwritable path, a full disk or a stream error only disables writing — a
+ * transcript is never worth failing a run over.
+ * ponytail: the cap counts the file's size at open + what we write, so retries
+ * appending to the same file stay bounded; no rotation.
+ */
+function openTranscriptTee(file: string): { onRawLine: (line: string) => void; close: () => void } | undefined {
+	let written = 0;
+	let stream: fs.WriteStream;
+	try {
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		try {
+			written = fs.statSync(file).size;
+		} catch {
+			/* no file yet */
+		}
+		stream = fs.createWriteStream(file, { flags: "a" });
+	} catch {
+		return undefined;
+	}
+	const override = Number(process.env.PI_TASKFLOW_TRANSCRIPT_MAX_BYTES);
+	const maxBytes = Number.isFinite(override) && override > 0 ? override : TRANSCRIPT_MAX_BYTES;
+	let writable = true;
+	stream.on("error", () => {
+		writable = false;
+	});
+	const write = (chunk: string) => {
+		try {
+			stream.write(chunk);
+		} catch {
+			writable = false;
+		}
+	};
+	return {
+		onRawLine(line) {
+			if (!writable) return;
+			const chunk = `${line}\n`;
+			written += Buffer.byteLength(chunk);
+			if (written > maxBytes) {
+				write('{"type":"taskflow_truncated"}\n');
+				writable = false;
+				return;
+			}
+			write(chunk);
+		},
+		close() {
+			writable = false;
+			try {
+				stream.end();
+			} catch {
+				/* ignore */
+			}
+		},
+	};
+}
+
 interface PiEventAccumulator extends EventAccumulator {
 	generation: number;
 	finalGeneration?: number;
@@ -417,6 +476,7 @@ export async function runAgentTask(
 	let tmpPromptPath: string | null = null;
 
 	const acc = newPiAccumulator(model);
+	const transcript = opts.transcriptFile ? openTranscriptTee(opts.transcriptFile) : undefined;
 
 	try {
 		const ctxEnabled = Boolean(opts.ctxDir && opts.nodeId);
@@ -486,6 +546,7 @@ export async function runAgentTask(
 			idleTimeoutMs: opts.idleTimeoutMs,
 			signal: opts.signal,
 			onLive: opts.onLive,
+			onRawLine: transcript?.onRawLine,
 			acc,
 			foldLine: foldPiEventLine,
 			completionPolicy: piCompletionPolicy(piChild.terminalGraceMs),
@@ -501,6 +562,7 @@ export async function runAgentTask(
 		}
 		return result;
 	} finally {
+		transcript?.close();
 		if (tmpPromptPath) {
 			try {
 				fs.unlinkSync(tmpPromptPath);

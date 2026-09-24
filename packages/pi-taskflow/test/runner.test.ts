@@ -911,6 +911,132 @@ test("Pi completion: agent_end with willRetry false is a revocable terminal cand
 	}
 });
 
+// ── transcript tee (task 2.3) ──────────────────────────────────────
+
+/** The stream is flushed asynchronously after `end()`; give it a moment. */
+async function readWhen(file: string, done: (text: string) => boolean): Promise<string> {
+	for (let i = 0; i < 100; i++) {
+		const text = fs.existsSync(file) ? fs.readFileSync(file, "utf-8") : "";
+		if (done(text)) return text;
+		await new Promise((r) => setTimeout(r, 20));
+	}
+	return fs.existsSync(file) ? fs.readFileSync(file, "utf-8") : "";
+}
+
+test("runAgentTask: transcriptFile receives the child's stdout lines verbatim", async () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tf-transcript-"));
+	const fakePi = path.join(dir, "fake-pi.mjs");
+	fs.writeFileSync(
+		fakePi,
+		`#!${process.execPath}\n` +
+			`const emit=x=>process.stdout.write(JSON.stringify(x)+"\\n");\n` +
+			`emit({type:"agent_start"}); emit({type:"turn_start"});\n` +
+			`emit({type:"message_end",message:{role:"assistant",content:[{type:"text",text:"DONE"}],stopReason:"stop"}});\n` +
+			`emit({type:"agent_end"});\n`,
+	);
+	fs.chmodSync(fakePi, 0o755);
+	const prevBin = process.env.PI_TASKFLOW_PI_BIN;
+	process.env.PI_TASKFLOW_PI_BIN = fakePi;
+	const transcriptFile = path.join(dir, "transcripts", "phase-1.ndjson");
+	try {
+		const agents: AgentConfig[] = [
+			{ name: "t", description: "t", systemPrompt: "", source: "user", filePath: "" },
+		];
+		const res = await runAgentTask(dir, agents, "t", "do work", { transcriptFile, idleTimeoutMs: 10_000 });
+		assert.equal(res.exitCode, 0);
+		const text = await readWhen(transcriptFile, (t) => t.includes("agent_end"));
+		const lines = text.split("\n").filter(Boolean);
+		assert.deepEqual(lines, [
+			'{"type":"agent_start"}',
+			'{"type":"turn_start"}',
+			'{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"DONE"}],"stopReason":"stop"}}',
+			'{"type":"agent_end"}',
+		]);
+	} finally {
+		if (prevBin === undefined) delete process.env.PI_TASKFLOW_PI_BIN;
+		else process.env.PI_TASKFLOW_PI_BIN = prevBin;
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("runAgentTask: transcript cap writes one truncation marker and stops", async () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tf-transcript-cap-"));
+	const fakePi = path.join(dir, "fake-pi.mjs");
+	fs.writeFileSync(
+		fakePi,
+		`#!${process.execPath}\n` +
+			`const emit=x=>process.stdout.write(JSON.stringify(x)+"\\n");\n` +
+			`emit({type:"agent_start"}); emit({type:"turn_start"});\n` +
+			`emit({type:"message_end",message:{role:"assistant",content:[{type:"text",text:"DONE"}],stopReason:"stop"}});\n` +
+			`emit({type:"agent_end"});\n`,
+	);
+	fs.chmodSync(fakePi, 0o755);
+	const prevBin = process.env.PI_TASKFLOW_PI_BIN;
+	const prevMax = process.env.PI_TASKFLOW_TRANSCRIPT_MAX_BYTES;
+	process.env.PI_TASKFLOW_PI_BIN = fakePi;
+	process.env.PI_TASKFLOW_TRANSCRIPT_MAX_BYTES = "30"; // smaller than the second line
+	const transcriptFile = path.join(dir, "capped.ndjson");
+	try {
+		const agents: AgentConfig[] = [
+			{ name: "t", description: "t", systemPrompt: "", source: "user", filePath: "" },
+		];
+		const res = await runAgentTask(dir, agents, "t", "do work", { transcriptFile, idleTimeoutMs: 10_000 });
+		assert.equal(res.exitCode, 0, "a capped transcript must not affect the run");
+		assert.equal(res.output, "DONE");
+		const text = await readWhen(transcriptFile, (t) => t.includes("taskflow_truncated"));
+		const lines = text.split("\n").filter(Boolean);
+		assert.equal(lines[0], '{"type":"agent_start"}');
+		assert.equal(lines.at(-1), '{"type":"taskflow_truncated"}');
+		assert.equal(lines.filter((l) => l.includes("taskflow_truncated")).length, 1);
+		assert.ok(!text.includes("agent_end"), "writing stops at the cap");
+	} finally {
+		if (prevBin === undefined) delete process.env.PI_TASKFLOW_PI_BIN;
+		else process.env.PI_TASKFLOW_PI_BIN = prevBin;
+		if (prevMax === undefined) delete process.env.PI_TASKFLOW_TRANSCRIPT_MAX_BYTES;
+		else process.env.PI_TASKFLOW_TRANSCRIPT_MAX_BYTES = prevMax;
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("runAgentTask: an unwritable transcriptFile leaves the RunResult unchanged", async () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tf-transcript-bad-"));
+	const fakePi = path.join(dir, "fake-pi.mjs");
+	fs.writeFileSync(
+		fakePi,
+		`#!${process.execPath}\n` +
+			`const emit=x=>process.stdout.write(JSON.stringify(x)+"\\n");\n` +
+			`emit({type:"agent_start"}); emit({type:"turn_start"});\n` +
+			`emit({type:"message_end",message:{role:"assistant",content:[{type:"text",text:"DONE"}],stopReason:"stop"}});\n` +
+			`emit({type:"agent_end"});\n`,
+	);
+	fs.chmodSync(fakePi, 0o755);
+	// A regular file used as a parent directory → mkdirSync/open both fail.
+	const blocker = path.join(dir, "not-a-dir");
+	fs.writeFileSync(blocker, "x");
+	const prevBin = process.env.PI_TASKFLOW_PI_BIN;
+	process.env.PI_TASKFLOW_PI_BIN = fakePi;
+	try {
+		const agents: AgentConfig[] = [
+			{ name: "t", description: "t", systemPrompt: "", source: "user", filePath: "" },
+		];
+		const baseline = await runAgentTask(dir, agents, "t", "do work", { idleTimeoutMs: 10_000 });
+		const teed = await runAgentTask(dir, agents, "t", "do work", {
+			idleTimeoutMs: 10_000,
+			transcriptFile: path.join(blocker, "nope.ndjson"),
+		});
+		assert.equal(teed.exitCode, baseline.exitCode);
+		assert.equal(teed.output, baseline.output);
+		assert.equal(teed.stderr, baseline.stderr);
+		assert.equal(teed.errorMessage, baseline.errorMessage);
+		assert.equal(teed.stopReason, baseline.stopReason);
+		assert.equal(teed.completionSource, baseline.completionSource);
+	} finally {
+		if (prevBin === undefined) delete process.env.PI_TASKFLOW_PI_BIN;
+		else process.env.PI_TASKFLOW_PI_BIN = prevBin;
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
 test("Pi completion: retrying agent_end waits for the later settled answer", async () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tf-pi-terminal-retry-"));
 	const fakePi = path.join(dir, "fake-pi.mjs");
