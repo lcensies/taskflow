@@ -413,6 +413,21 @@ export async function runEventKernel(state: RunState, deps: EventKernelDeps): Pr
 		const outcomes = await Promise.all(
 			runnable.map(async ({ phase }): Promise<PhaseOutcome> => {
 				const startedAt = Date.now();
+				// Persist a "running" checkpoint BEFORE awaiting stepPhase — otherwise an
+				// in-flight phase is entirely absent from the persisted RunState until
+				// the whole layer's atomic commit runs, and the viewer renders it as
+				// "pending" instead of "running" while it is actively executing.
+				state.phases[phase.id] = { id: phase.id, status: "running", startedAt };
+				try {
+					deps.persist?.(state);
+				} catch {
+					/* fail-open */
+				}
+				try {
+					deps.onProgress?.(state);
+				} catch {
+					/* fail-open */
+				}
 				const readRefs: string[] = [];
 				const promptCalls: string[] = [];
 				const ctx: StepContext = { state, deps: stepDeps, steps, args, readRefs, promptCalls };

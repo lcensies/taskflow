@@ -34,8 +34,16 @@ function shortModel(model?: string): string {
 
 // Braille dots spinner (ora classic) — smooth, clockwise, single-width.
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/** Repaint cadence for time-driven content. The host only redraws the card when
+ *  `renderFingerprint` changes, so anything animated must advance on the same
+ *  bucket — a faster spinner would skip frames and read as a random glyph. */
+export const TICK_MS = 1000;
+function tick(): number {
+	return Math.floor(Date.now() / TICK_MS);
+}
 function spinnerFrame(): string {
-	return SPINNER[Math.floor(Date.now() / 120) % SPINNER.length];
+	return SPINNER[tick() % SPINNER.length];
 }
 
 // Elapsed as 5s / 3m30s / 1h05m
@@ -459,8 +467,7 @@ export function renderFingerprint(state: RunState): string {
 	const phaseParts = Object.entries(state.phases)
 		.map(([id, ps]) => `${id}:${ps.status}:${ps.liveText ?? ""}:${ps.usage?.turns ?? 0}`)
 		.join("|");
-	const footerSecond = Math.floor(Date.now() / 1000);
-	return `${state.status}#${phaseParts}#${footerSecond}`;
+	return `${state.status}#${phaseParts}#${tick()}`;
 }
 
 /** Recent activity per running phase (expanded view of an in-flight run). */
