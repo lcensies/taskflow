@@ -112,12 +112,29 @@ export function looksLikeHtmlOrJson(s: string): boolean {
 }
 
 /**
+ * Strip terminal control sequences from subagent-authored text, then collapse
+ * whitespace. Subagent output is untrusted input to a TUI: a model that echoes
+ * `ESC[2J` (or a bash arg containing it) would otherwise reach the terminal
+ * verbatim through `liveText`/`liveLog`/error snippets and clear or corrupt the
+ * host's frame. Truncation helpers deliberately preserve CSI, so this must
+ * happen at the boundary where the text enters run state.
+ */
+export function stripControlSequences(raw: string): string {
+	return raw
+		.replace(/\u001b\][\s\S]*?(?:\u0007|\u001b\\)/g, "") // OSC ... BEL | ST
+		.replace(/\u001b[[\]()#;?]*[0-9;?]*[ -/]*[@-~]/g, "") // CSI and friends
+		.replace(/[\u0000-\u001f\u007f]+/g, " ") // leftover C0 + DEL
+		.replace(/ {2,}/g, " ")
+		.trim();
+}
+
+/**
  * Truncate and (when obviously HTML) summarize an errorMessage before it is
  * persisted. Returns the cleaned string. Empty input returns empty.
  */
 export function sanitizeErrorMessage(raw: string | undefined): string {
 	if (!raw) return "";
-	const cleaned = raw.replace(/[ \t\n\r]+/g, " ").trim();
+	const cleaned = stripControlSequences(raw);
 	if (!cleaned) return "";
 	// Decide the sanitization branch on the RAW length, not the whitespace-
 	// collapsed length — otherwise an HTML page padded with spaces would slip
@@ -234,7 +251,7 @@ function describeActivity(msg: CoreMessage): string {
 		else if (part.type === "toolCall") lastTool = summarizeToolCall(part.name, part.arguments ?? {});
 	}
 	const chosen = lastText || lastTool;
-	return chosen.replace(/[ \t\n\r]+/g, " ").trim();
+	return stripControlSequences(chosen);
 }
 
 export function summarizeToolCall(name: string, args: Record<string, unknown>): string {

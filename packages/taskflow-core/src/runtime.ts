@@ -4861,7 +4861,12 @@ async function runTaskflowLayers(state: RunState, deps: RuntimeDeps): Promise<Ru
 				...(priorPs?.model ? { model: priorPs.model } : {}),
 				...(priorPs?.attempts ? { attempts: priorPs.attempts } : {}),
 			};
-			safeProgress(deps, state);
+			// Phase-start is a checkpoint (see safeEmit docstring): persist the
+			// "running" entry now, not just at completion. Otherwise a detached run
+			// polled mid-flight (no other phase completing to trigger a flush) shows
+			// the in-flight phase as absent from the persisted RunState — the viewer
+			// then falls back to "pending" for a phase that is actually running.
+			safeEmit(deps, state);
 
 			const ps = await executePhase(phase, state, deps, prior, () => safeProgress(deps, state));
 			// Preserve the phase start time: executePhase returns a fresh PhaseState
