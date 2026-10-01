@@ -26,7 +26,7 @@ import {
 	runInteractiveInit,
 } from "./init.ts";
 import { Type, type TObject } from "typebox";
-import { type AgentScope, discoverAgents, readSubagentSettings, shouldSyncBuiltinAgentsToProject, syncBuiltinAgentsToProject } from "taskflow-core";
+import { type AgentConfig, type AgentScope, discoverAgents, type Phase, plannedModelFor, readSubagentSettings, shouldSyncBuiltinAgentsToProject, syncBuiltinAgentsToProject } from "taskflow-core";
 import { renderFingerprint, renderRunResult, summarizeRun } from "./render.ts";
 import { createPiSubagentRunner, PI_TASKFLOW_PI_ENTRY_ENV, resolveParentPiCliEntry, runnerModulePath } from "./runner.ts";
 import { RunHistoryComponent, type RunHistoryResult } from "./runs-view.ts";
@@ -68,6 +68,9 @@ import {
 import { type UsageStats } from "taskflow-core";
 import { resolveArgs, type Taskflow, validateTaskflow, desugar, isShorthand } from "taskflow-core";
 import {
+	deleteFlow,
+	deleteRun,
+	deleteTerminalRuns,
 	getFlow,
 	getFlowDiagnosed,
 	listFlows,
@@ -164,8 +167,8 @@ const ShorthandStep = Type.Object(
 );
 
 const TaskflowParamsSchema = Type.Object({
-	action: StringEnum(["run", "save", "resume", "list", "agents", "init", "verify", "compile", "plan", "analytics", "ir", "provenance", "trace", "replay", "why-stale", "recompute", "reconcile-workspace", "cache-clear", "search", "version"] as const, {
-		description: "What to do: run a flow, save a definition, resume a paused run, list saved flows, list available agents, init model role configuration, verify the DAG, compile the DAG to a Mermaid diagram + verification report, preflight-plan a flow (zero tokens), aggregate last-N run analytics, compile to FlowIR + content hash, show observed readSet provenance, show a run's event trace, offline-replay a trace under alternate knobs (zero tokens), explain why a run is stale, minimally recompute a stale run, explicitly reconcile a dirty resolve-only workspace, clear the cross-run memoization cache, or report the taskflow build/host identity (version)",
+	action: StringEnum(["run", "save", "resume", "list", "agents", "init", "verify", "compile", "plan", "analytics", "ir", "provenance", "trace", "replay", "why-stale", "recompute", "reconcile-workspace", "cache-clear", "delete", "search", "version"] as const, {
+		description: "What to do: run a flow, save a definition, resume a paused run, list saved flows, list available agents, init model role configuration, verify the DAG, compile the DAG to a Mermaid diagram + verification report, preflight-plan a flow (zero tokens), aggregate last-N run analytics, compile to FlowIR + content hash, show observed readSet provenance, show a run's event trace, offline-replay a trace under alternate knobs (zero tokens), explain why a run is stale, minimally recompute a stale run, explicitly reconcile a dirty resolve-only workspace, clear the cross-run memoization cache, delete a stored run (runId) or a saved flow (name), or report the taskflow build/host identity (version)",
 		default: "run",
 	}),
 	name: Type.Optional(Type.String({ description: "Name of a saved flow (for run/save without inline define)" })),
@@ -875,6 +878,28 @@ async function runFlow(
  *  satisfy (they receive different context types from pi). */
 type ViewCtx = Pick<ExtensionContext, "cwd" | "hasUI" | "ui" | "isIdle">;
 
+/**
+ * Planned-model resolver for the viewers: what a phase WILL run on before it
+ * starts. Agent discovery hits disk, so it is done once per cwd.
+ * ponytail: never invalidated within a session — editing agents/settings mid-session
+ * keeps the old planned models until restart; add a mtime check if that bites.
+ */
+const plannedModelByCwd = new Map<string, (phase: Phase) => string | undefined>();
+function plannedModelResolver(cwd: string): (phase: Phase) => string | undefined {
+	const hit = plannedModelByCwd.get(cwd);
+	if (hit) return hit;
+	let agents: AgentConfig[] = [];
+	try {
+		const settings = readSubagentSettings();
+		agents = discoverAgents(cwd, "both", settings.modelRoles, settings.taskflow).agents;
+	} catch {
+		/* unreadable agents dir: a phase simply shows no planned model */
+	}
+	const fn = (phase: Phase): string | undefined => plannedModelFor(phase, agents);
+	plannedModelByCwd.set(cwd, fn);
+	return fn;
+}
+
 /** Stored-run history panel — the `/tf runs` view, and the inspector's fallback
  *  when no run is in flight. */
 async function openRunHistory(pi: ExtensionAPI, ctx: ViewCtx): Promise<void> {
@@ -904,6 +929,11 @@ async function openRunHistory(pi: ExtensionAPI, ctx: ViewCtx): Promise<void> {
 				transcriptFile: (run, nodeId) =>
 					transcriptFileFor(transcriptDirFor(runsDir(ctx.cwd), run.flowName, run.runId), nodeId),
 				rows: () => tui.terminal.rows,
+				plannedModel: plannedModelResolver(ctx.cwd),
+				delete: {
+					run: (runId) => deleteRun(ctx.cwd, runId),
+					allFinished: () => deleteTerminalRuns(ctx.cwd),
+				},
 			},
 		),
 		{ overlay: true, overlayOptions: { width: "90%", maxHeight: "90%", margin: 1 } },
@@ -951,6 +981,7 @@ async function openInspector(pi: ExtensionAPI, ctx: ViewCtx): Promise<void> {
 				() => tui.requestRender(),
 				() => tui.terminal.rows,
 				(nodeId) => transcriptFileFor(transcriptDir, nodeId),
+				plannedModelResolver(ctx.cwd),
 			),
 			{ overlay: true, overlayOptions: { width: "90%", maxHeight: "90%", margin: 1 } },
 		);
@@ -1453,6 +1484,51 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
+			// delete — remove one stored run (runId) or one saved flow (name).
+			if (action === "delete") {
+				if (params.runId) {
+					const res = deleteRun(ctx.cwd, params.runId);
+					if (!res.ok) {
+						const why = res.reason === "running"
+							? "it is still executing"
+							: res.reason === "busy"
+								? "it was written by another process during the delete; try again"
+								: "no run with that id";
+						return {
+							content: [{ type: "text", text: `Cannot delete run "${params.runId}": ${why}.` }],
+							isError: true,
+							details: { action } satisfies TaskflowDetails,
+						};
+					}
+					return {
+						content: [{ type: "text", text: `Deleted run "${params.runId}" and its artifacts.` }],
+						details: { action } satisfies TaskflowDetails,
+					};
+				}
+				if (params.name) {
+					if (!deleteFlow(ctx.cwd, params.name)) {
+						return {
+							content: [{ type: "text", text: `No saved flow named "${params.name}".` }],
+							isError: true,
+							details: { action } satisfies TaskflowDetails,
+						};
+					}
+					return {
+						content: [{
+							type: "text",
+							// The slash command was registered at startup; it cannot be unregistered.
+							text: `Deleted saved flow "${params.name}". Its /tf:${params.name} command disappears next session; runs it produced are kept.`,
+						}],
+						details: { action } satisfies TaskflowDetails,
+					};
+				}
+				return {
+					content: [{ type: "text", text: 'delete requires either runId (a stored run) or name (a saved flow).' }],
+					isError: true,
+					details: { action } satisfies TaskflowDetails,
+				};
+			}
+
 			// version — report build/host identity (0.2.0 dogfood issue 4).
 			if (action === "version") {
 				const info = getBuildInfo();
@@ -1876,17 +1952,17 @@ export default function (pi: ExtensionAPI) {
 				const t = result.content[0];
 				return new Text(t?.type === "text" ? t.text : "(no output)", 0, 0);
 			}
-			return renderRunResult(details.state, details.finalOutput ?? "", theme, expanded);
+			return renderRunResult(details.state, details.finalOutput ?? "", theme, expanded, plannedModelResolver(details.state.cwd));
 		},
 	});
 
 	// ---- The /tf user command ----
 	pi.registerCommand("tf", {
-		description: "Taskflow: list | run <name> | show <name> | verify <name> | compile <name> | plan <name> | runs | peek <runId> [phaseId] | reconcile-workspace --ack | init",
+		description: "Taskflow: list | run <name> | show <name> | verify <name> | compile <name> | plan <name> | runs | peek <runId> [phaseId] | delete <name> | reconcile-workspace --ack | init",
 		getArgumentCompletions: (prefix) => {
-			const subs = ["list", "run", "show", "runs", "peek", "resume", "init", "save", "verify", "compile", "plan", "analytics", "ir", "provenance", "trace", "replay", "why-stale", "recompute", "reconcile-workspace", "version"];
+			const subs = ["list", "run", "show", "runs", "peek", "resume", "init", "save", "verify", "compile", "plan", "analytics", "ir", "provenance", "trace", "replay", "why-stale", "recompute", "reconcile-workspace", "delete", "version"];
 			// Name-taking subcommands: complete saved flow names after the sub (cwd from session_start).
-			const nameSubs = new Set(["run", "show", "verify", "compile", "plan", "analytics", "ir"]);
+			const nameSubs = new Set(["run", "show", "verify", "compile", "plan", "analytics", "ir", "delete"]);
 			const trimmed = prefix.trimStart();
 			const space = trimmed.indexOf(" ");
 			if (space >= 0) {
@@ -1952,6 +2028,22 @@ export default function (pi: ExtensionAPI) {
 				} catch (error) {
 					ctx.ui.notify(`Workspace reconciliation failed: ${error instanceof Error ? error.message : String(error)}`, "error");
 				}
+				return;
+			}
+
+			if (sub === "delete") {
+				if (!arg) {
+					ctx.ui.notify("Usage: /tf delete <flow name>  (use the runs panel's d/D keys to delete runs)", "warning");
+					return;
+				}
+				if (!deleteFlow(ctx.cwd, arg)) {
+					ctx.ui.notify(`No saved flow named "${arg}".`, "error");
+					return;
+				}
+				ctx.ui.notify(
+					`Deleted saved flow "${arg}". Its /tf:${arg} command disappears next session; its runs are kept.`,
+					"info",
+				);
 				return;
 			}
 

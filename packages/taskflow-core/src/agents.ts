@@ -199,6 +199,18 @@ export interface AgentDiscoveryResult {
 	projectAgentsDir: string | null;
 }
 
+/**
+ * The model a phase will run on, known before it starts: the phase's own model,
+ * else its agent's (already role-resolved by `discoverAgents`). Undefined when
+ * neither names one — callers must show nothing rather than guess.
+ */
+export function plannedModelFor(
+	phase: { model?: string; agent?: string },
+	agents: readonly AgentConfig[],
+): string | undefined {
+	return phase.model ?? agents.find((a) => a.name === phase.agent)?.model;
+}
+
 function loadAgentsFromDir(dir: string, source: "user" | "project" | "built-in"): AgentConfig[] {
 	const agents: AgentConfig[] = [];
 	if (!fs.existsSync(dir)) return agents;

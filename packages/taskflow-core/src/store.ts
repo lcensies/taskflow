@@ -1989,6 +1989,79 @@ export function saveRun(state: RunState, cleanup?: { maxKeep?: number; maxAgeDay
 	}
 }
 
+export type DeleteRunResult = { ok: true } | { ok: false; reason: "running" | "missing" | "busy" };
+
+/**
+ * Explicitly delete one stored run and every artifact it owns (record, trace,
+ * transcripts, context tree, isolated workspace, detached control records).
+ *
+ * Reuses the retention path rather than unlinking directly: drop the index
+ * entry, then hand the same snapshot to the helper the automatic sweep uses,
+ * which re-validates it under the per-run lock. A run saved by another process
+ * in between is therefore never removed ('busy' — the helper restores the index
+ * entry). A running run is refused outright.
+ */
+export function deleteRun(cwd: string, runId: string): DeleteRunResult {
+	if (!validateRunId(runId)) return { ok: false, reason: "missing" };
+	const state = loadRun(cwd, runId);
+	if (!state) return { ok: false, reason: "missing" };
+	if (state.status === "running") return { ok: false, reason: "running" };
+
+	const root = runsDir(cwd);
+	let relPath: string;
+	try {
+		relPath = withLock(indexLockPath(root), () => {
+			const entries = readIndex(root);
+			const entry = entries.find((e) => e.runId === runId);
+			if (entry) writeIndex(root, entries.filter((e) => e !== entry));
+			return entry?.relPath ?? `${safeFlowDirName(state.flowName)}/${runId}.json`;
+		}, CLEANUP_LOCK_TIMEOUT_MS);
+	} catch {
+		return { ok: false, reason: "busy" };
+	}
+
+	if (!cleanupRunArtifactsIfSnapshotMatches(root, extractIndexEntry(state, relPath))) {
+		return { ok: false, reason: "busy" };
+	}
+	try { fs.rmdirSync(path.dirname(runIndexFilePath(root, relPath))); } catch { /* flow dir still has runs */ }
+	return { ok: true };
+}
+
+/** Delete every run that is not currently executing. Returns how many went. */
+export function deleteTerminalRuns(cwd: string): number {
+	let removed = 0;
+	for (const run of listRuns(cwd, Number.POSITIVE_INFINITY)) {
+		if (run.status === "running") continue;
+		if (deleteRun(cwd, run.runId).ok) removed++;
+	}
+	return removed;
+}
+
+/**
+ * Delete a saved flow definition and its library sidecar. Resolves through
+ * `getFlow` so only a discovered definition file is ever touched; returns false
+ * for an unknown name or anything that is not a regular file (symlink included).
+ */
+export function deleteFlow(cwd: string, name: string): boolean {
+	const flow = getFlow(cwd, name);
+	if (!flow) return false;
+	const filePath = flow.filePath;
+	try {
+		return withLock(`${filePath}.lock`, () => {
+			try {
+				if (!fs.lstatSync(filePath).isFile()) return false;
+				fs.unlinkSync(filePath);
+			} catch {
+				return false;
+			}
+			try { fs.unlinkSync(sidecarPathIn(filePath)); } catch { /* no sidecar */ }
+			return true;
+		});
+	} catch {
+		return false;
+	}
+}
+
 /**
  * Load a single run by runId.
  *

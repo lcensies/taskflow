@@ -7,7 +7,7 @@
  * manual upward scroll drops it, End/G restores it.
  */
 
-import { matchesKey } from "@earendil-works/pi-tui";
+import { matchesKey, isKeyRelease } from "@earendil-works/pi-tui";
 
 const FALLBACK_VISIBLE = 10;
 
@@ -20,6 +20,8 @@ export class ScrollPane {
 
 	/** Returns true when the key was a scroll key (and was consumed). */
 	handleKey(data: string): boolean {
+		// Kitty protocol reports press AND release; scrolling on both doubles every step.
+		if (isKeyRelease(data)) return true;
 		const page = Math.max(1, this.lastVisible - 1);
 		if (matchesKey(data, "up") || data === "k") {
 			this.scrollBy(-1);

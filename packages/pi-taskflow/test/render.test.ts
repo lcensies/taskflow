@@ -160,7 +160,9 @@ test("summarizeRun: reports done / running / failed counts", () => {
 		},
 	);
 	const s = summarizeRun(state);
-	assert.match(s, /1\/3 done/);
+	// Total comes from the definition, not the lazily-created phase entries: 3 of the
+	// diamond's 6 phases have started, so a just-started run must not report "1/3".
+	assert.match(s, /1\/6 done/);
 	assert.match(s, /1 running/);
 	assert.match(s, /1 failed/);
 });
@@ -272,4 +274,63 @@ test("renderFingerprint: stable for an unchanged state within the same second", 
 	const def: Taskflow = { name: "x", phases: [{ id: "p", type: "agent", task: "t", final: true }] };
 	const state = mkState(def, { p: done("p") }, "completed");
 	assert.equal(renderFingerprint(state), renderFingerprint(state));
+});
+
+// --- back-edges, current-stage marker, planned model -----------------------
+
+const loopy: Taskflow = {
+	name: "loopy",
+	phases: [
+		{ id: "draft", type: "agent", agent: "executor", task: "t" },
+		{ id: "polish", type: "loop", task: "t", until: "true", dependsOn: ["draft"] },
+		{ id: "check", type: "gate", task: "t", onBlock: "retry", dependsOn: ["draft", "polish"], final: true },
+	],
+};
+
+test("renderProgress: loop and retrying-gate rows show their back-edges while pending", () => {
+	const out = renderProgress(mkState(loopy, {}), theme as any);
+	assert.match(out, /↻ self/, "loop phase should show a self back-edge");
+	assert.match(out, /↺ retry → draft, polish/, "retrying gate should name the deps it re-runs");
+});
+
+test("renderProgress: loop row shows the iteration count once the run reports it", () => {
+	const state = mkState(loopy, {
+		polish: {
+			id: "polish", status: "done", usage: emptyUsage(), startedAt: 0, endedAt: 1,
+			loop: { iterations: 3, stop: "until" },
+		},
+	});
+	assert.match(renderProgress(state, theme as any), /↻ self×3/);
+});
+
+test("renderProgress: a plain pipeline gets no back-edge annotation", () => {
+	const out = renderProgress(mkState(diamond, {}), theme as any);
+	assert.doesNotMatch(out, /↻|↺/);
+});
+
+test("renderProgress: only the running rows carry the ▸ current-stage marker", () => {
+	const state = mkState(loopy, {
+		draft: { id: "draft", status: "running", usage: emptyUsage(), startedAt: 0 },
+		polish: { id: "polish", status: "running", usage: emptyUsage(), startedAt: 0 },
+	});
+	// The header carries its own ▸ run-status glyph; only count phase rows.
+	const marked = renderProgress(state, theme as any)
+		.split("\n")
+		.filter((l) => l.includes("▸") && /draft|polish|check/.test(l));
+	assert.equal(marked.length, 2);
+	assert.ok(marked.every((l) => /draft|polish/.test(l)));
+});
+
+test("renderProgress: pending rows show the planned model, started rows the actual one", () => {
+	const state = mkState(loopy, {
+		draft: { id: "draft", status: "done", usage: emptyUsage(), startedAt: 0, endedAt: 1, model: "anthropic/claude-sonnet-4-5" },
+	});
+	const out = renderProgress(state, theme as any, {
+		plannedModel: (p) => (p.id === "polish" ? "openai/gpt-5" : undefined),
+	});
+	const lines = out.split("\n");
+	assert.match(lines.find((l) => l.includes("draft"))!, /（claude-sonnet-4-5）/);
+	assert.match(lines.find((l) => l.includes("polish"))!, /（~gpt-5）/);
+	// No resolver result for `check` — show nothing rather than a wrong model.
+	assert.doesNotMatch(lines.find((l) => l.includes("check"))!, /（/);
 });

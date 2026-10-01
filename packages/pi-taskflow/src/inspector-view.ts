@@ -13,8 +13,9 @@
  */
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { type PhaseState, type RunState, splitItems } from "taskflow-core";
+import { isKeyRelease, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { type Phase, type PhaseState, type RunState, splitItems } from "taskflow-core";
+import { backEdgeAnnotation } from "./render.ts";
 import { ScrollPane } from "./scroll-pane.ts";
 import { renderTranscript, TranscriptTail } from "./transcript-view.ts";
 
@@ -34,6 +35,8 @@ export type ListAction = "up" | "down" | "pageUp" | "pageDown" | "top" | "bottom
  * Pure — the caller decides what each action means at its level.
  */
 export function listKey(data: string): ListAction | undefined {
+	// Kitty protocol reports press AND release; acting on both moves twice per keypress.
+	if (isKeyRelease(data)) return undefined;
 	if (matchesKey(data, "up") || data === "k") return "up";
 	if (matchesKey(data, "down") || data === "j") return "down";
 	if (matchesKey(data, "pageUp") || matchesKey(data, "ctrl+u")) return "pageUp";
@@ -133,12 +136,29 @@ function statusBadge(status: string, theme: Theme): string {
 	return theme.fg("dim", "○");
 }
 
-function phaseLine(ps: PhaseState | undefined, id: string, theme: Theme): string {
-	const badge = statusBadge(ps?.status ?? "pending", theme);
+function phaseLine(
+	phase: Phase,
+	ps: PhaseState | undefined,
+	theme: Theme,
+	planned?: string,
+): string {
+	const status = ps?.status ?? "pending";
+	const badge = statusBadge(status, theme);
+	// Current-stage marker, distinct from the status glyph so it survives a scan
+	// of a long list and marks every concurrently running phase.
+	const now = status === "running" ? theme.fg("warning", "▸") : " ";
+	const label = phase.label ?? phase.id;
 	const sub = ps?.subProgress;
 	const fanout = sub ? theme.fg("muted", ` ${sub.done}/${sub.total}`) : "";
 	const steered = ps?.steered ? theme.fg("accent", " ⇢") : "";
-	return `${badge} ${id}${fanout}${steered}`;
+	const role = phase.agent ?? phase.type ?? "agent";
+	const model = ps?.model ? shortModel(ps.model) : planned ? `~${shortModel(planned)}` : "";
+	const who = theme.fg("dim", `  ${role}${model ? `（${model}）` : ""}`);
+	return `${now}${badge} ${label}${fanout}${steered}${who}${backEdgeAnnotation(phase, ps, theme)}`;
+}
+
+function shortModel(model: string): string {
+	return model.split("/").pop() ?? model;
 }
 
 function agentLine(row: AgentRow, theme: Theme): string {
@@ -166,6 +186,8 @@ export class InspectorComponent {
 	/** False when this host/run has no steering channel. */
 	private steerAvailable: boolean;
 	private rows: () => number;
+	/** Model a phase will run on before it starts; undefined when unresolvable. */
+	private plannedModel?: (phase: Phase) => string | undefined;
 	/** nodeId → transcript file; undefined when the host keeps no transcripts. */
 	private transcriptFile?: (nodeId: string) => string | undefined;
 
@@ -177,6 +199,7 @@ export class InspectorComponent {
 		requestRender?: () => void,
 		rows?: () => number,
 		transcriptFile?: (nodeId: string) => string | undefined,
+		plannedModel?: (phase: Phase) => string | undefined,
 	) {
 		this.state = state;
 		this.theme = theme;
@@ -184,6 +207,10 @@ export class InspectorComponent {
 		this.steerAvailable = steerAvailable;
 		this.rows = rows ?? (() => FALLBACK_ROWS);
 		this.transcriptFile = transcriptFile;
+		this.plannedModel = plannedModel;
+		// Open on where the run actually is, not on phase 1 of a finished prefix.
+		const running = (state.def.phases ?? []).findIndex((p) => state.phases[p.id]?.status === "running");
+		if (running >= 0) this.cursors[0] = running;
 		if (requestRender) {
 			// The runtime mutates `state` in place; repaint on a timer rather than
 			// subscribing, so the inspector never perturbs the run.
@@ -199,6 +226,18 @@ export class InspectorComponent {
 	dispose(): void {
 		if (this.timer) clearInterval(this.timer);
 		this.timer = undefined;
+	}
+
+	/**
+	 * Adopt a freshly loaded copy of this run. A stored run is re-read from disk
+	 * by the owning panel, so without this the navigator keeps rendering the
+	 * snapshot it was constructed with and a progressing run looks frozen.
+	 * Navigation state is deliberately kept: the user stays where they were.
+	 */
+	setState(state: RunState): void {
+		if (state === this.state) return;
+		this.state = state;
+		this.invalidate();
 	}
 
 	private phaseIds(): string[] {
@@ -254,6 +293,7 @@ export class InspectorComponent {
 	}
 
 	handleInput(data: string): void {
+		if (isKeyRelease(data)) return;
 		this.invalidate();
 		if (this.level === "detail") {
 			if (matchesKey(data, "escape")) {
@@ -327,7 +367,10 @@ export class InspectorComponent {
 		const lines: string[] = [];
 		lines.push(`${th.fg("accent", id ?? "?")} ${th.fg("dim", ps?.status ?? "pending")}`);
 		const meta: string[] = [];
+		const phase = (this.state.def.phases ?? []).find((p) => p.id === id);
+		const planned = phase ? this.plannedModel?.(phase) : undefined;
 		if (ps?.model) meta.push(ps.model);
+		else if (planned) meta.push(`~${planned}`);
 		if (ps?.usage) meta.push(`${ps.usage.input + ps.usage.output} tok`);
 		if (ps?.attempts && ps.attempts > 1) meta.push(`${ps.attempts} attempts`);
 		if (ps?.steered) meta.push("steered");
@@ -417,7 +460,9 @@ export class InspectorComponent {
 				: this.listLines(
 						this.level === "agents"
 							? this.currentAgentRows().map((row) => agentLine(row, th))
-							: this.phaseIds().map((id) => phaseLine(this.state.phases[id], id, th)),
+						: (this.state.def.phases ?? []).map((p) =>
+								phaseLine(p, this.state.phases[p.id], th, this.plannedModel?.(p)),
+							),
 						this.cursor,
 					);
 		const lines = [

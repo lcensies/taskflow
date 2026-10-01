@@ -797,6 +797,7 @@ use the default. Use cheap agents (`scout`) for discovery and strong agents
 | `reconcile-workspace` | Explicitly reconcile a dirty resolve-only cwd workspace after acknowledging the risk. |
 | `version` | Report package version, build commit, run-state schema version, and host identity. Zero tokens. |
 | `cache-clear` | Clear the cross-run memoization store. |
+| `delete` | Delete a stored run (`runId`) with all its artifacts, or a saved flow definition (`name`). A run that is still executing is refused; deleting a flow keeps its runs. |
 | `search` | Search the reusable-flow **library** by purpose/tags (structural + CJK-aware keyword scoring). Find a flow to reuse before authoring a new one. |
 | `init` | Model-roles configuration. `mode: "show"` is read-only; `apply-defaults` requires `force: true`; `interactive` needs a UI session. |
 
@@ -867,6 +868,18 @@ A run moves through: **running →** `completed` (a `final` phase produced outpu
   `PgDn/ctrl+d` page, `Home/g` top, `End/G` bottom, `Enter/→/l` opens the next
   level (or scrolls, inside `detail`), `Esc/←/h` pops back a level, `q/ctrl+c`
   closes the panel.
+  Phase rows carry a `▸` current-stage marker on every running phase, the
+  model each phase runs on (`~model` while it is only the planned one,
+  resolved from the phase/agent before it starts), and back-edges that a
+  topological list would otherwise hide: `↻ self×N` for a `loop` phase and
+  `↺ retry → <deps>` for a gate with `onBlock:"retry"`. A run opened from
+  `/tf runs` keeps following the state on disk while the navigator is open.
+- **Delete runs and flows.** In `/tf runs`: `d` deletes the selected run,
+  `D` clears every finished run — each asks `y/n` first, and a run that is
+  still executing is refused. `/tf delete <name>` removes a saved flow
+  definition (its runs are kept; its `/tf:<name>` command goes away next
+  session). The agent-facing equivalent is the tool's `action:"delete"` with
+  `runId` or `name`.
 - **Steer a running subagent.** In the inspector, `s` sends a message to the
   selected phase from any level — `phases`, `agents`, or `detail` all steer
   the owning phase, never a single fan-out item (every item of a
@@ -883,6 +896,7 @@ A run moves through: **running →** `completed` (a `final` phase produced outpu
 - `/tf peek <runId> [phaseId] [--json] [--item <n>] [--limit <chars>]`
 - `/tf provenance <runId>` · `/tf trace <runId> [--json]` · `/tf replay <runId> [--threshold phase=n] [--budget-usd n] [--json]`
 - `/tf why-stale <runId> [phaseId]` · `/tf recompute <runId> <phaseId> [--apply]` (dry-run by default)
+- `/tf delete <name>` — delete a saved flow (runs: `d` / `D` in `/tf runs`)
 - `/tf reconcile-workspace --ack` · `/tf version`
 - `/tf init` — interactive model-roles setup
 - `/tf:<name> [args]` — shortcut for each saved flow

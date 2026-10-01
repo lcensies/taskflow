@@ -461,3 +461,73 @@ test("inspector detail: the footer advertises the toggle and flips with ctrl+o",
 		view.dispose();
 	}
 });
+
+// --- phase rows: current stage, model, back-edges ---------------------------
+
+function mkDefRun(def: any, phases: RunState["phases"]): RunState {
+	return {
+		runId: "flow-abc-1",
+		flowName: "demo",
+		status: "running",
+		createdAt: 1000,
+		updatedAt: 1000,
+		cwd: "/tmp",
+		def,
+		phases,
+		args: {},
+	} as RunState;
+}
+
+const backEdgeDef = {
+	name: "demo",
+	phases: [
+		{ id: "draft", type: "agent", agent: "executor", task: "t" },
+		{ id: "polish", type: "loop", task: "t", until: "true", dependsOn: ["draft"] },
+		{ id: "check", type: "gate", task: "t", onBlock: "retry", dependsOn: ["polish"] },
+	],
+};
+
+test("inspector: phase rows show ▸ for the running phase, models and back-edges", () => {
+	const state = mkDefRun(backEdgeDef, {
+		draft: { id: "draft", status: "done", model: "anthropic/claude-haiku-4-5" } as PhaseState,
+		polish: { id: "polish", status: "running" } as PhaseState,
+	});
+	const view = new InspectorComponent(
+		state, theme, () => {}, false, undefined, () => 24, undefined,
+		(p) => (p.id === "check" ? "openai/gpt-5" : undefined),
+	);
+	const lines = view.render(70);
+	const row = (id: string) => lines.find((l) => l.includes(id))!;
+	assert.match(row("draft"), /（claude-haiku-4-5）/);
+	assert.doesNotMatch(row("draft"), /▸/);
+	assert.match(row("polish"), /▸/);
+	assert.match(row("polish"), /↻ self/);
+	assert.match(row("check"), /（~gpt-5）/);
+	assert.match(row("check"), /↺ retry → polish/);
+	for (const l of lines) assert.ok(visibleWidth(l) <= 70, `line too wide: ${l}`);
+	view.dispose();
+});
+
+test("inspector: the cursor opens on the running phase", () => {
+	const state = mkDefRun(backEdgeDef, {
+		draft: { id: "draft", status: "done" } as PhaseState,
+		polish: { id: "polish", status: "running" } as PhaseState,
+	});
+	const view = new InspectorComponent(state, theme, () => {}, false, undefined, () => 24);
+	const selected = view.render(70).find((l) => l.includes("❯"))!;
+	assert.match(selected, /polish/);
+	view.dispose();
+});
+
+test("inspector: setState adopts a newer copy and keeps the cursor", () => {
+	const state = mkDefRun(backEdgeDef, { polish: { id: "polish", status: "running" } as PhaseState });
+	const view = new InspectorComponent(state, theme, () => {}, false, undefined, () => 24);
+	view.setState(mkDefRun(backEdgeDef, {
+		polish: { id: "polish", status: "done" } as PhaseState,
+		check: { id: "check", status: "running" } as PhaseState,
+	}));
+	const lines = view.render(70);
+	assert.match(lines.find((l) => l.includes("check"))!, /▸/);
+	assert.match(lines.find((l) => l.includes("❯"))!, /polish/, "cursor must not jump on refresh");
+	view.dispose();
+});
