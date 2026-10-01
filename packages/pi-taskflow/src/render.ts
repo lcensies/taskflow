@@ -76,11 +76,32 @@ function miniBar(done: number, total: number, theme: Theme, width = 8): string {
 	return theme.fg("accent", "━".repeat(filled)) + theme.fg("dim", "─".repeat(width - filled));
 }
 
-function agentRole(phase: Phase, ps: PhaseState | undefined, theme: Theme): string {
+function agentRole(phase: Phase, ps: PhaseState | undefined, theme: Theme, planned?: string): string {
 	const role = phase.agent ?? phase.type ?? "agent";
-	const model = ps?.model ? shortModel(ps.model) : "";
+	// `~` marks a model that is only planned (resolved from the definition /
+	// agent) rather than the one a started phase actually ran on.
+	const model = ps?.model ? shortModel(ps.model) : planned ? `~${shortModel(planned)}` : "";
 	if (!model) return theme.fg("accent", role);
 	return theme.fg("accent", role) + theme.fg("dim", `（${model}）`);
+}
+
+/**
+ * Control flow that returns to an earlier stage — invisible in a topologically
+ * layered list, which is why a looping flow otherwise reads as a pipeline.
+ * Both sources are static properties of the definition, so the annotation shows
+ * before the phase runs; the loop count is added once the run reports it.
+ */
+export function backEdgeAnnotation(phase: Phase, ps: PhaseState | undefined, theme: Theme): string {
+	if ((phase.type ?? "agent") === "loop") {
+		const n = ps?.loop?.iterations;
+		return theme.fg("toolTitle", `  ↻ self${n ? `×${n}` : ""}`);
+	}
+	if (phase.type === "gate" && phase.onBlock === "retry") {
+		const deps = dependenciesOf(phase);
+		if (deps.length === 0) return theme.fg("toolTitle", "  ↺ retry");
+		return theme.fg("toolTitle", `  ↺ retry → ${deps.join(", ")}`);
+	}
+	return "";
 }
 
 function costStr(usage: UsageStats | undefined, theme: Theme): string {
@@ -108,12 +129,21 @@ function runElapsed(state: RunState): number {
 	return Math.max(0, max - min);
 }
 
+/**
+ * Phase entries are created lazily when a phase starts, so counting `state.phases`
+ * alone reports a total that grows during the run ("0/0" → "1/3"). Graft-promoted
+ * phases go the other way: they exist in `state.phases` but never in `def.phases`.
+ */
+function phaseTotal(state: RunState): number {
+	return Math.max(state.def?.phases?.length ?? 0, Object.keys(state.phases).length);
+}
+
 export function summarizeRun(state: RunState): string {
 	const phases = Object.values(state.phases);
 	const done = phases.filter((p) => p.status === "done").length;
 	const failed = phases.filter((p) => p.status === "failed").length;
 	const running = phases.filter((p) => p.status === "running").length;
-	const total = Object.keys(state.phases).length;
+	const total = phaseTotal(state);
 	const bits = [`${done}/${total} done`];
 	if (running) bits.push(`${running} running`);
 	if (failed) bits.push(`${failed} failed`);
@@ -121,17 +151,23 @@ export function summarizeRun(state: RunState): string {
 }
 
 /** Build the detail column for a phase (the right-hand info). */
-function phaseDetail(phase: Phase, ps: PhaseState | undefined, theme: Theme): string {
-	const detail = phaseDetailInner(phase, ps, theme);
+function phaseDetail(phase: Phase, ps: PhaseState | undefined, theme: Theme, planned?: string): string {
+	const detail = phaseDetailInner(phase, ps, theme, planned);
 	// Side-effect marker: the phase declared idempotent:false — it is never
 	// cached and transient errors are not auto-retried.
 	if (ps?.sideEffect) return detail + theme.fg("warning", "  ⚡");
 	return detail;
 }
 
-function phaseDetailInner(phase: Phase, ps: PhaseState | undefined, theme: Theme): string {
+function phaseDetailInner(phase: Phase, ps: PhaseState | undefined, theme: Theme, planned?: string): string {
 	const type = phase.type ?? "agent";
-	if (!ps || ps.status === "pending") return theme.fg("dim", "—");
+	// Not started: show what it WILL run as (role + planned model) instead of a
+	// dash — the model a step is about to use is the thing users ask for.
+	if (!ps || ps.status === "pending") {
+		const role = phase.agent ?? type;
+		const model = planned ? theme.fg("dim", `（~${shortModel(planned)}）`) : "";
+		return theme.fg("dim", role) + model;
+	}
 
 	if (ps.status === "skipped") {
 		const reason = (ps.error ?? "upstream failed").replace(/\s+/g, " ");
@@ -161,7 +197,7 @@ function phaseDetailInner(phase: Phase, ps: PhaseState | undefined, theme: Theme
 	const time = t ? theme.fg("dim", elapsed(t)) : "";
 
 	if (ps.status === "running") {
-		const roleLabel = agentRole(phase, ps, theme);
+		const roleLabel = agentRole(phase, ps, theme, planned);
 		const cost = costStr(ps.usage, theme);
 		if (isFanout && ps.subProgress) {
 			const { done, total, running, failed } = ps.subProgress;
@@ -201,7 +237,7 @@ function phaseDetailInner(phase: Phase, ps: PhaseState | undefined, theme: Theme
 		return s;
 	}
 	// single-agent done
-	const roleLabel = agentRole(phase, ps, theme);
+	const roleLabel = agentRole(phase, ps, theme, planned);
 	const cost = costStr(ps.usage, theme);
 	if (ps.approval) {
 		const d = ps.approval.decision;
@@ -274,7 +310,7 @@ function headerLine(state: RunState, theme: Theme): string {
 	const done = phases.filter((p) => p.status === "done").length;
 	const failed = phases.filter((p) => p.status === "failed").length;
 	const running = phases.filter((p) => p.status === "running").length;
-	const total = Object.keys(state.phases).length;
+	const total = phaseTotal(state);
 
 	const head =
 		state.status === "completed"
@@ -343,7 +379,7 @@ const LABEL_MAX = 40;
 export function renderProgress(
 	state: RunState,
 	theme: Theme,
-	opts?: { width?: number; maxRows?: number },
+	opts?: { width?: number; maxRows?: number; plannedModel?: (phase: Phase) => string | undefined },
 ): string {
 	const phases = state.def.phases;
 	const labelOf = (p: Phase) => p.label ?? p.id;
@@ -377,7 +413,7 @@ export function renderProgress(
 		const status = ps?.status ?? "pending";
 		const id = truncateToWidth(labelOf(phase), idW).padEnd(idW);
 		const type = (phase.type ?? "agent").padEnd(typeW);
-		const detail = phaseDetail(phase, ps, theme);
+		const detail = phaseDetail(phase, ps, theme, opts?.plannedModel?.(phase));
 
 		// Annotate only "long" edges — dependencies that skip past the adjacent
 		// layer. Edges into the immediately-preceding layer are implied by position
@@ -389,14 +425,19 @@ export function renderProgress(
 			: "";
 
 		const gutter = rail === " " ? " " : theme.fg("borderMuted", rail);
+		// "Where is the run right now": occupies the blank cell that already sat
+		// between gutter and status glyph, so row width is unchanged.
+		const now = status === "running" ? theme.fg("warning", "▸") : " ";
+		const label = status === "running" ? theme.bold(theme.fg("text", id)) : theme.fg(status === "pending" ? "dim" : "text", id);
 		let row =
-			`  ${gutter} ${icon(status, theme)} ` +
-			theme.fg(status === "pending" ? "dim" : "text", id) +
+			`  ${gutter}${now}${icon(status, theme)} ` +
+			label +
 			"  " +
 			theme.fg("dim", type) +
 			"  " +
 			detail +
-			dep;
+			dep +
+			backEdgeAnnotation(phase, ps, theme);
 
 		// Live activity sub-line (only while running, only if we have a message).
 		if (status === "running" && ps?.liveText) {
@@ -510,9 +551,10 @@ export function renderRunResult(
 	finalOutput: string,
 	theme: Theme,
 	expanded: boolean,
+	plannedModel?: (phase: Phase) => string | undefined,
 ): Component {
 	const progress = new Lines((width) => {
-		let text = renderProgress(state, theme, expanded ? { width } : { width, maxRows: 14 });
+		let text = renderProgress(state, theme, expanded ? { width, plannedModel } : { width, maxRows: 14, plannedModel });
 		if (!expanded) text += `\n  ${theme.fg("dim", "Ctrl+O to expand")}`;
 		return text;
 	});

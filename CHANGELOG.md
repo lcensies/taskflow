@@ -4,6 +4,17 @@ All notable changes to taskflow are documented here. This project follows [Keep 
 
 ## [Unreleased]
 
+### Added
+
+- **Deletion (`action: "delete"`).** `deleteRun` / `deleteTerminalRuns` / `deleteFlow` in `taskflow-core` remove a stored run with all its artifacts (record, trace, transcripts, context tree, workspace, index entry) or a saved flow definition, reusing the retention path's lock + snapshot guards. A running run is refused. Pi host: `d` deletes the selected run and `D` clears finished runs in `/tf runs` (both confirmed with `y/n`), `/tf delete <name>` removes a saved flow.
+- **Model shown for every phase.** Phase rows now show the model a phase *will* run on (`~model`, resolved from the phase or its agent) before it starts, and the actual model once it has.
+- **Back-edges rendered.** A `loop` phase shows `↻ self×N` and a gate with `onBlock: "retry"` shows `↺ retry → <deps>`, so a flow that can return to an earlier stage no longer reads as a straight pipeline.
+- **Current-stage marker.** Every running phase row carries `▸`, and the navigator opens its cursor on a running phase.
+
+### Fixed
+
+- A run opened from `/tf runs` no longer renders a frozen snapshot: the panel pushes each refreshed run state into the open navigator.
+
 ### Chore
 
 - HOL plugin-scanner highs: dummy test credentials use scanner placeholders / short literals; no `eval (` in comments; smoke/runner no longer place a `${…}` template within 30 chars of `spawn`. Local scan 81/100, 0 high. **Not GA.**

@@ -148,3 +148,84 @@ test("runs-view: no live hooks → no timer, renders static (back-compat)", () =
 	// dispose must be a no-op safe to call even without a timer.
 	view.dispose();
 });
+
+test("runs-view: an open navigator follows refreshed run state", async () => {
+	const def = { name: "demo", phases: [{ id: "build" }, { id: "review" }] } as any;
+	const run = mkRun({ runId: "flow-live", def, phases: { build: { status: "running" } } as any });
+	let snapshot = [run];
+	const view = new RunHistoryComponent([run], theme, () => {}, {
+		refresh: () => snapshot,
+		requestRender: () => {},
+		intervalMs: 200,
+	});
+	try {
+		view.handleInput("\r"); // open the navigator on flow-live
+		assert.match(view.render(80).join("\n"), /▸.*build/);
+		snapshot = [
+			mkRun({
+				runId: "flow-live",
+				def,
+				updatedAt: 2000,
+				phases: { build: { status: "done" }, review: { status: "running" } } as any,
+			}),
+		];
+		await new Promise((r) => setTimeout(r, 260));
+		const out = view.render(80).join("\n");
+		assert.match(out, /▸.*review/, "navigator must show the advanced state");
+	} finally {
+		view.dispose();
+	}
+});
+
+test("runs-view: d + y deletes the selected run, d + n leaves it", () => {
+	const a = mkRun({ runId: "flow-a", flowName: "alpha", status: "completed" });
+	const b = mkRun({ runId: "flow-b", flowName: "bravo", status: "completed" });
+	let remaining = [a, b];
+	const deleted: string[] = [];
+	const view = new RunHistoryComponent([a, b], theme, () => {}, undefined, {
+		delete: {
+			run: (runId) => {
+				deleted.push(runId);
+				remaining = remaining.filter((r) => r.runId !== runId);
+				return { ok: true };
+			},
+			allFinished: () => 0,
+		},
+	});
+
+	view.handleInput("d");
+	assert.match(view.render(80).join("\n"), /delete alpha flow-a\? y\/n/);
+	view.handleInput("n");
+	assert.deepEqual(deleted, [], "cancelling must delete nothing");
+
+	view.handleInput("d");
+	view.handleInput("y");
+	assert.deepEqual(deleted, ["flow-a"]);
+	const out = view.render(80).join("\n");
+	assert.doesNotMatch(out, /alpha/);
+	assert.match(out, /bravo/);
+	view.dispose();
+});
+
+test("runs-view: a running run cannot be armed for deletion", () => {
+	const view = new RunHistoryComponent([mkRun({ status: "running" })], theme, () => {}, undefined, {
+		delete: { run: () => ({ ok: false, reason: "running" }), allFinished: () => 0 },
+	});
+	view.handleInput("d");
+	assert.match(view.render(80).join("\n"), /still executing/);
+	view.dispose();
+});
+
+test("runs-view: D clears finished runs and closes when nothing remains", () => {
+	let closed = 0;
+	const view = new RunHistoryComponent([mkRun({ status: "completed" })], theme, () => {
+		closed++;
+	}, undefined, {
+		delete: { run: () => ({ ok: true }), allFinished: () => 1 },
+	});
+	view.handleInput("D");
+	assert.match(view.render(80).join("\n"), /clear 1 finished run\(s\)\? y\/n/);
+	view.handleInput("y");
+	assert.equal(closed, 1, "panel closes once the list is empty");
+	view.dispose();
+});
