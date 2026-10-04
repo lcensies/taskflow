@@ -193,36 +193,29 @@ function phaseDetailInner(phase: Phase, ps: PhaseState | undefined, theme: Theme
 		return tag + theme.fg("error", snip) + (ps.warnings?.length ? theme.fg("warning", `  ⚠${ps.warnings.length}`) : "");
 	}
 
-	const t = phaseElapsed(ps);
+	const t = ps.status === "running" ? 0 : phaseElapsed(ps);
 	const time = t ? theme.fg("dim", elapsed(t)) : "";
 
 	if (ps.status === "running") {
 		const roleLabel = agentRole(phase, ps, theme, planned);
-		const cost = costStr(ps.usage, theme);
 		if (isFanout && ps.subProgress) {
 			const { done, total, running, failed } = ps.subProgress;
 			let s = `${miniBar(done, total, theme)} ${theme.fg("toolOutput", `${done}/${total}`)}`;
 			if (running) s += theme.fg("dim", ` · ${running} run`);
 			if (failed) s += theme.fg("error", ` · ${failed}✗`);
 			s += `  ${roleLabel}`;
-			if (cost) s += `  ${cost}`;
-			if (time) s += `  ${time}`;
 			if (ps.warnings?.length) s += theme.fg("warning", `  ⚠${ps.warnings.length}`);
 			return s;
 		}
 		let s = roleLabel;
-		if (cost) s += `  ${cost}`;
-		if (time) s += `  ${time}`;
 		if (ps.warnings?.length) s += theme.fg("warning", `  ⚠${ps.warnings.length}`);
 		return s;
 	}
 
 	// done
-	// Cross-run cache hit: show a compact badge with age and the $0 cost.
+	// Cross-run cache hit: show a compact badge and the $0 cost.
 	if (ps.cacheHit === "cross-run") {
-		const ageMs = ps.endedAt ? Date.now() - ps.endedAt : 0;
 		let c = theme.fg("success", "✓") + " " + theme.fg("toolOutput", theme.bold("CACHED")) + theme.fg("dim", " cross-run");
-		if (ageMs > 1500) c += theme.fg("dim", ` · ${elapsed(ageMs)} ago`);
 		if (ps.warnings?.length) c += theme.fg("warning", `  ⚠${ps.warnings.length}`);
 		return c;
 	}
@@ -335,10 +328,9 @@ function headerLine(state: RunState, theme: Theme): string {
 
 /**
  * Footer line: the last line of the block and the only one carrying
- * time-based content (spinner, run elapsed, cost). Keeping every animated bit
- * here means a redraw only ever changes this one line, never a row above it.
+ * time-based content (spinner, run elapsed, cost).
  */
-function footerLine(state: RunState, theme: Theme): string {
+function footerLine(state: RunState, theme: Theme, liveText?: string): string {
 	const spin = state.status === "running" ? theme.fg("warning", spinnerFrame()) : theme.fg("dim", "·");
 	let line = `  ${spin}`;
 	const cost = aggregateCost(state);
@@ -347,6 +339,7 @@ function footerLine(state: RunState, theme: Theme): string {
 	else if (cost) line += theme.fg("muted", ` · $${cost >= 0.01 ? cost.toFixed(2) : cost.toFixed(4)}`);
 	const el = runElapsed(state);
 	if (el) line += theme.fg("dim", ` · ${elapsed(el)}`);
+	if (liveText) line += theme.fg("muted", ` · › ${liveText.replace(/\s+/g, " ").trim()}`);
 	return line;
 }
 
@@ -439,8 +432,9 @@ export function renderProgress(
 			dep +
 			backEdgeAnnotation(phase, ps, theme);
 
-		// Live activity sub-line (only while running, only if we have a message).
-		if (status === "running" && ps?.liveText) {
+		// Compact tool card puts live activity on its final line. An earlier
+		// phase can scroll above the viewport, where edits force a full clear.
+		if (!opts?.maxRows && status === "running" && ps?.liveText) {
 			const indent = " ".repeat(2 + 2 + 2 + idW + 2);
 			const msg = ps.liveText.replace(/\s+/g, " ").trim();
 			const snip = msg.length > 88 ? `${msg.slice(0, 88)}…` : msg;
@@ -493,7 +487,8 @@ export function renderProgress(
 		flushFold(order.length);
 	}
 
-	const lines = [headerLine(state, theme), ...bodyLines.flatMap((l) => l.split("\n")), footerLine(state, theme)];
+	const liveText = maxRows === undefined ? undefined : [...order].reverse().map(({ phase }) => state.phases[phase.id]).find((ps) => ps?.status === "running" && ps.liveText)?.liveText;
+	const lines = [headerLine(state, theme), ...bodyLines.flatMap((l) => l.split("\n")), footerLine(state, theme, liveText)];
 	const { width } = opts ?? {};
 	return (width ? lines.map((l) => truncateToWidth(l, width)) : lines).join("\n");
 }
@@ -555,7 +550,7 @@ export function renderRunResult(
 ): Component {
 	const progress = new Lines((width) => {
 		let text = renderProgress(state, theme, expanded ? { width, plannedModel } : { width, maxRows: 14, plannedModel });
-		if (!expanded) text += `\n  ${theme.fg("dim", "Ctrl+O to expand")}`;
+		if (!expanded) text = text.replace(/\n([^\n]*)$/, `\n  ${theme.fg("dim", "Ctrl+O to expand")}\n$1`);
 		return text;
 	});
 

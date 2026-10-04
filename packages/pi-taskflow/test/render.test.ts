@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { renderFingerprint, renderProgress, renderRunningActivity, summarizeRun } from "../src/render.ts";
+import { renderFingerprint, renderProgress, renderRunResult, renderRunningActivity, summarizeRun } from "../src/render.ts";
 import { emptyUsage } from "taskflow-core";
 import type { Taskflow } from "taskflow-core";
 import type { PhaseState, RunState } from "taskflow-core";
@@ -268,6 +268,67 @@ test("renderProgress: a labelled phase shows its label instead of its id", () =>
 	const state = mkState(def, { "t1-2": done("t1-2") });
 	const out = renderProgress(state, theme);
 	assert.match(out, /1\.2 Add CSV formatting utilities/);
+});
+
+test("renderProgress: unchanged running phases change only footer across seconds", () => {
+	const def: Taskflow = { name: "x", phases: [{ id: "p", type: "agent", task: "t", final: true }] };
+	const state = mkState(def, { p: { id: "p", status: "running", startedAt: 10_000, usage: emptyUsage() } });
+	const now = Date.now;
+	try {
+		Date.now = () => 11_000;
+		const first = renderProgress(state, theme).split("\n");
+		Date.now = () => 12_000;
+		const second = renderProgress(state, theme).split("\n");
+		assert.deepEqual(first.slice(0, -1), second.slice(0, -1));
+		assert.notEqual(first.at(-1), second.at(-1));
+	} finally {
+		Date.now = now;
+	}
+});
+
+test("renderProgress: cached phases remain unchanged while another phase runs", () => {
+	const def: Taskflow = { name: "x", phases: [{ id: "cached", type: "agent", task: "t" }, { id: "active", type: "agent", task: "t" }] };
+	const state = mkState(def, {
+		cached: { ...done("cached"), cacheHit: "cross-run", endedAt: 1000 },
+		active: { id: "active", status: "running", startedAt: 10_000, usage: emptyUsage() },
+	});
+	const now = Date.now;
+	try {
+		Date.now = () => 11_000;
+		const first = renderProgress(state, theme).split("\n");
+		Date.now = () => 13_000;
+		const second = renderProgress(state, theme).split("\n");
+		assert.deepEqual(first.slice(0, -1), second.slice(0, -1));
+	} finally {
+		Date.now = now;
+	}
+});
+
+test("renderRunResult: collapsed card keeps live activity on last line", () => {
+	const def: Taskflow = { name: "x", phases: [{ id: "p", type: "agent", task: "t", final: true }] };
+	const state = mkState(def, { p: { id: "p", status: "running", startedAt: Date.now(), liveText: "one", usage: emptyUsage() } });
+	const first = renderRunResult(state, "", theme, false).render(80);
+	state.phases.p.liveText = "two";
+	const second = renderRunResult(state, "", theme, false).render(80);
+	assert.deepEqual(first.slice(0, -1), second.slice(0, -1));
+	assert.match(second.at(-1)!, /two/);
+});
+
+test("renderRunResult: collapsed card keeps timer on last line", () => {
+	const def: Taskflow = { name: "x", phases: [{ id: "p", type: "agent", task: "t", final: true }] };
+	const state = mkState(def, { p: { id: "p", status: "running", startedAt: 10_000, usage: emptyUsage() } });
+	const now = Date.now;
+	try {
+		Date.now = () => 11_000;
+		const first = renderRunResult(state, "", theme, false).render(80);
+		Date.now = () => 12_000;
+		const second = renderRunResult(state, "", theme, false).render(80);
+		assert.deepEqual(first.slice(0, -1), second.slice(0, -1));
+		assert.notEqual(first.at(-1), second.at(-1));
+		assert.match(first.at(-2)!, /Ctrl\+O/);
+	} finally {
+		Date.now = now;
+	}
 });
 
 test("renderFingerprint: stable for an unchanged state within the same second", () => {
