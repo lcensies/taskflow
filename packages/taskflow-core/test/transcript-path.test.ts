@@ -9,7 +9,7 @@ import { emptyUsage } from "../src/usage.ts";
 import { executeTaskflow, type RuntimeDeps } from "../src/runtime.ts";
 import type { Taskflow } from "../src/schema.ts";
 import type { RunState } from "../src/store.ts";
-import { transcriptFileFor } from "../src/store.ts";
+import { outcomeFileFor, transcriptFileFor } from "../src/store.ts";
 
 const AGENTS: AgentConfig[] = [
 	{ name: "a", description: "test agent", systemPrompt: "", source: "user", filePath: "" },
@@ -60,4 +60,40 @@ test("transcriptFileFor: traversal in a node id stays inside the transcript dir"
 	assert.throws(() => transcriptFileFor(dir, ".."), /Unsafe nodeId/);
 	assert.throws(() => transcriptFileFor(dir, "."), /Unsafe nodeId/);
 	assert.throws(() => transcriptFileFor(dir, ""), /Unsafe nodeId/);
+});
+
+test("outcomeFileFor: a phase id with separators resolves beside the transcript the runtime writes", async () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tf-outcome-path-"));
+	const def: Taskflow = {
+		name: "sanitize-outcome",
+		phases: [{ id: "review:api", type: "agent", agent: "a", task: "review", final: true }],
+	};
+	const transcriptFiles: (string | undefined)[] = [];
+	const runTask: RuntimeDeps["runTask"] = async (_cwd, _agents, agentName, task, o: RunOptions) => {
+		transcriptFiles.push(o.transcriptFile);
+		return { agent: agentName, task, exitCode: 0, output: "ok", stderr: "", usage: emptyUsage(), stopReason: "end" };
+	};
+	const deps: RuntimeDeps = { cwd: "/tmp", agents: AGENTS, runTask, transcriptDir: dir, persist: () => {}, onProgress: () => {} };
+	try {
+		const res = await executeTaskflow(mkState(def), deps);
+		assert.equal(res.ok, true);
+		// The outcome record must land on the same node segment the runtime used for the transcript.
+		assert.equal(outcomeFileFor(dir, "review:api"), path.join(dir, "review_api.outcome.json"));
+		assert.deepEqual(
+			transcriptFiles,
+			[outcomeFileFor(dir, "review:api").replace(/\.outcome\.json$/, ".ndjson")],
+		);
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("outcomeFileFor: traversal in a node id stays inside the transcript dir", () => {
+	const dir = path.join(os.tmpdir(), "tf-outcome-guard");
+	const file = outcomeFileFor(dir, "../x");
+	assert.equal(path.dirname(file), dir);
+	assert.ok(path.resolve(file).startsWith(`${path.resolve(dir)}${path.sep}`));
+	assert.throws(() => outcomeFileFor(dir, ".."), /Unsafe nodeId/);
+	assert.throws(() => outcomeFileFor(dir, "."), /Unsafe nodeId/);
+	assert.throws(() => outcomeFileFor(dir, ""), /Unsafe nodeId/);
 });
