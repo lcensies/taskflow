@@ -772,6 +772,25 @@ A run moves through: **running →** `completed` (a `final` phase produced outpu
 (a non-`optional` phase errored) **/** `paused` (aborted).
 `failed` and `paused` are resumable.
 
+**Durable outcome + reattach.** When a subagent settles, the process that
+observed it durably records the outcome (`completionSource`, exit code or
+signal, timings) next to the node's transcript — before anything else happens,
+so the record survives even if the orchestrating process dies immediately
+after. Loading a run reconciles any node whose *stored* status is still
+`running` against that record (plus a liveness probe of the worker's process
+group) into exactly one of three states:
+
+| State | Meaning |
+|-------|---------|
+| `running` | no outcome record yet, and the worker's process group is still alive |
+| `finished-unrecorded` | an outcome record exists — the worker finished, but the last checkpoint never saw it; the node is reported finished from that record |
+| `orphaned` | no outcome record, and the worker's process group is gone — the work's fate is genuinely unknown |
+
+`orphaned` is a state of its own, never silently reported as `failed` or
+`completed` — and it is never auto-retried or auto-completed by `resume`. It
+surfaces so a human decides, the same way a crashed build leaves a stopped
+pipeline rather than guessing at an outcome.
+
 - **Resume forks immutable history.** `action: "resume"` accepts only a
   `failed` or `paused` run, creates a new child `runId` with `parentRunId`,
   reuses completed unaffected phases, and never overwrites the parent. Optional
@@ -821,6 +840,27 @@ A run moves through: **running →** `completed` (a `final` phase produced outpu
   topological list would otherwise hide: `↻ self×N` for a `loop` phase and
   `↺ retry → <deps>` for a gate with `onBlock:"retry"`. A run opened from
   `/tf runs` keeps following the state on disk while the navigator is open.
+  A node reconciled on load (see Durable outcome + reattach above) reads
+  differently from a genuinely running one: `⚠ orphaned` (no current-stage
+  marker — nothing is actually running) or `⟲ unrecorded` (adopted from its
+  outcome record). Both are distinct from the plain `◐` running badge.
+- **Watch a worker live (opt-in tmux window).** Set `taskflow.workerWindows:
+  true` in `settings.json` (or `workerWindow: true` on one phase, which
+  overrides the setting either way) to have each node that spawns a subagent
+  open its own tmux window — named `tf:<runId-short>:<nodeId>`, created lazily
+  on the node's first output. The window runs `peek --follow <transcriptFile>`:
+  the **same transcript reader the inspector uses**, so a node renders
+  identically in both surfaces, and following is read-only — it never mutates
+  the transcript, the run, or the worker. The window is a viewer only: it holds
+  no handle on the worker, so closing it, killing the tmux server, or never
+  opening one does not change how the worker runs or how its completion is
+  classified. A per-run cap (`PI_TASKFLOW_TMUX_MAX_WINDOWS`, default 10)
+  bounds a wide fan-out — nodes past the cap run windowless and are reported,
+  not silently dropped. tmux missing or unreachable fails open: the run is
+  unaffected and a `warnings` diagnostic records that the window could not
+  open. **Off by default** — the feature's own window and this inspector are
+  already the primary surfaces; opt in when you want a worker to persist in
+  scrollback or sit beside another node for comparison.
 - **Delete runs and flows.** In `/tf runs`: `d` deletes the selected run,
   `D` clears every finished run — each asks `y/n` first, and a run that is
   still executing is refused. `/tf delete <name>` removes a saved flow
