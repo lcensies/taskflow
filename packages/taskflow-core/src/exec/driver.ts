@@ -6,7 +6,7 @@
  * the def (no unsupported advanced features).
  */
 
-import type { RunState } from "../store.ts";
+import { deriveVerdict, type RunState } from "../store.ts";
 import { dependenciesOf, resolveArgs, topoLayers, type Budget, type Phase, type Taskflow, validateTaskflow } from "../schema.ts";
 import { resolveFinalOutput } from "../final-output.ts";
 import { aggregateUsage, emptyUsage } from "../usage.ts";
@@ -468,6 +468,10 @@ export async function runEventKernel(state: RunState, deps: EventKernelDeps): Pr
 					.filter((id): id is string => typeof id === "string"),
 			)).map((stepId) => ({ stepId, version: state.phases[stepId]?.inputHash }));
 
+			// Work verdict (D6): derived from an explicit check only (gate decision or
+			// a script phase's own deterministic pass/fail), never from `st` alone.
+			const verdict = deriveVerdict(phase.type ?? "agent", result.gate, st);
+
 			state.phases[phase.id] = {
 				id: phase.id,
 				status: st,
@@ -482,6 +486,7 @@ export async function runEventKernel(state: RunState, deps: EventKernelDeps): Pr
 				gate: result.gate,
 				approval: result.approval,
 				warnings: result.warnings,
+				...(verdict ? { verdict } : {}),
 				...(observedReads.length ? { reads: observedReads } : {}),
 				...(result.promptStats ? { promptStats: result.promptStats } : {}),
 				...(phase.idempotent === false && result.status !== "skipped" ? { sideEffect: true as const } : {}),

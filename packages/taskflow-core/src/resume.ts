@@ -39,10 +39,26 @@ function resumeStatusErrors(prev: RunState): string[] {
 		: [`Run '${prev.runId}' has status '${prev.status}' and is not resumable (expected failed or paused)`];
 }
 
+/** Orphaned nodes (design D5) stay out of automatic recovery: no outcome was
+ * recorded and the worker is gone, so nobody knows whether the work happened.
+ * A plain resume would drop the phase and silently re-run it, so resume is
+ * refused unless the user explicitly overrides that very phase. */
+function orphanedPhaseErrors(prev: RunState, ov?: ResumeOverrides): string[] {
+	const orphaned = Object.entries(prev.phases)
+		.filter(([id, ps]) => ps?.reattach === "orphaned" && id !== ov?.phaseId)
+		.map(([id]) => id)
+		.sort();
+	if (!orphaned.length) return [];
+	return [
+		`Run '${prev.runId}' has orphaned node(s) ${orphaned.join(", ")}: no outcome was recorded and the worker is gone, ` +
+			"so resuming would re-run work that may already have happened. Resume with an explicit override for that phase, or start a new run.",
+	];
+}
+
 /** Runs are resumable only when execution stopped non-terminally. Completed and
  * blocked runs are immutable terminal history; use a fresh run or recompute. */
 export function validateResumeRun(prev: RunState): { ok: boolean; errors: string[] } {
-	const errors = resumeStatusErrors(prev);
+	const errors = [...resumeStatusErrors(prev), ...orphanedPhaseErrors(prev)];
 	const validation = validateTaskflow(prev.def);
 	if (!validation.ok) {
 		errors.push(...validation.errors.map((error) => `stored run definition is invalid: ${error}`));
@@ -58,14 +74,18 @@ export function validateResumeOverrides(prev: RunState, ov: ResumeOverrides): { 
 	// validate the patched child below rather than rejecting the parent shape.
 	const errors = resumeStatusErrors(prev);
 	if (!ov.phaseId || typeof ov.phaseId !== "string") {
+		errors.push(...orphanedPhaseErrors(prev));
 		errors.push("resume overrides require a 'phaseId'");
 		return { ok: false, errors };
 	}
 	const phase = prev.def.phases.find((p) => p.id === ov.phaseId);
 	if (!phase) {
 		errors.push(`resume overrides target phase '${ov.phaseId}' not found in run '${prev.runId}' (flow '${prev.flowName}')`);
+		errors.push(...orphanedPhaseErrors(prev));
 		return { ok: false, errors };
 	}
+	// Any orphaned node the override does NOT name would be re-run silently.
+	errors.push(...orphanedPhaseErrors(prev, ov));
 	// At least one override field must be supplied (besides phaseId).
 	const hasAny = ov.task !== undefined || ov.model !== undefined || ov.timeout !== undefined || ov.idleTimeout !== undefined;
 	if (!hasAny) {
@@ -146,6 +166,9 @@ export function transitiveDownstream(phases: Phase[], target: string): string[] 
  *  - Without `overrides` (ordinary resume): the child def is a deep clone of the
  *    parent def; ALL `done` phases are copied; non-done (failed/paused/running)
  *    phases are omitted so the runtime re-runs them.
+ *
+ *  A run carrying an orphaned node (design D5) is refused unless `overrides`
+ *  names that node — orphaned work is never re-run automatically.
  *
  *  `prev` is never mutated. Returns the child RunState (ready for
  *  `executeTaskflow`). */

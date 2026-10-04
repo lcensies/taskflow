@@ -23,6 +23,7 @@ import { parseStrict } from "./interpolate.ts";
 import type { Taskflow } from "./schema.ts";
 import { directoryIdentity, type DirectoryIdentity } from "./cwd-bridge.ts";
 import type { UsageStats } from "./usage.ts";
+import type { RunResult } from "./host/runner-types.ts";
 import type { DeclaredDeps } from "./flowir/meta.ts";
 import type { ScorerResult } from "./scorers.ts";
 import type { FlowMeta } from "./library/types.ts";
@@ -121,6 +122,20 @@ export interface PhaseState {
 	 *  Its output no longer follows from the flow definition alone, so it is never
 	 *  written to the cross-run cache. */
 	steered?: true;
+	/** Reconciliation state for a phase whose *stored* status was `running`,
+	 *  decided at load time from the records its worker left on disk (design D5).
+	 *  `orphaned` is reported as itself — never rewritten to `failed`/`done`. */
+	reattach?: ReattachState;
+	/** How the worker settled, adopted from its durable outcome record when the
+	 *  stored state never recorded the completion. */
+	completionSource?: OutcomeRecord["completionSource"];
+	/** Work verdict (design D6), distinct from `status`/`error`: whether this
+	 *  node's work was *accepted*, as opposed to whether its worker *exited
+	 *  cleanly*. A clean process exit alone never sets this — absent means
+	 *  undetermined. Only an explicit check (a gate decision, a `script`
+	 *  phase's deterministic pass/fail, or an approval decision) writes it,
+	 *  and doing so never touches `status`/`error`/`completionSource`. */
+	verdict?: "accepted" | "rejected";
 	/** Gate verdict (gate phases only). */
 	gate?: {
 		verdict: "pass" | "block";
@@ -395,14 +410,215 @@ export function transcriptDirFor(runsRoot: string, flowName: string, runId: stri
 	return path.join(flowRunDir(runsRoot, flowName), runId);
 }
 
-/** Return a node's transcript file path inside its run's transcript dir.
- *  `nodeId` is sanitized with the same rule the runtime uses to build node ids
- *  (and `steerFileFor` uses), so writers and readers agree on the path for a
- *  phase id that contains separators like `review:api`. */
-export function transcriptFileFor(dir: string, nodeId: string): string {
+/** Sanitize a node id into a single path segment, with the same rule the
+ *  runtime uses to build node ids (and `steerFileFor` uses), so writers and
+ *  readers agree on the path for a phase id that contains separators like
+ *  `review:api` and no id can address a file outside `dir`. */
+function safeNodeSegment(nodeId: string, what: string): string {
 	const safe = nodeId.replace(/[^A-Za-z0-9._-]+/g, "_");
-	if (!safe || safe === "." || safe === "..") throw new Error(`Unsafe nodeId for transcript file: ${nodeId}`);
-	return path.join(dir, `${safe}.ndjson`);
+	if (!safe || safe === "." || safe === "..") throw new Error(`Unsafe nodeId for ${what} file: ${nodeId}`);
+	return safe;
+}
+
+/** Return a node's transcript file path inside its run's transcript dir. */
+export function transcriptFileFor(dir: string, nodeId: string): string {
+	return path.join(dir, `${safeNodeSegment(nodeId, "transcript")}.ndjson`);
+}
+
+/** Return a node's durable outcome record path, sibling of its transcript. */
+export function outcomeFileFor(dir: string, nodeId: string): string {
+	return path.join(dir, `${safeNodeSegment(nodeId, "outcome")}.outcome.json`);
+}
+
+/** Return a node's worker-process record path, sibling of its transcript. */
+export function workerFileFor(dir: string, nodeId: string): string {
+	return path.join(dir, `${safeNodeSegment(nodeId, "worker")}.worker.json`);
+}
+
+/**
+ * A worker's process identity, recorded at spawn by the process that owns it
+ * so a later process can probe whether a node still marked `running` is alive.
+ * Same precedent as the detached process registry (`detached-control.ts`):
+ * a pid durable on disk outlives the process that knew it in memory.
+ */
+export interface WorkerRecord {
+	pid: number;
+	/** The group to probe/signal. Equals `pid` on POSIX — subagents are spawned
+	 *  `detached`, so each child leads its own group. Absent on Windows. */
+	pgid?: number;
+	startedAt: number;
+}
+
+/** Write a node's worker record atomically, at the path its readers resolve.
+ *  Fail-open, like the outcome record: an unwritable location is not a phase
+ *  failure, it only costs the later liveness probe. */
+export function writeWorkerRecord(dir: string, nodeId: string, record: WorkerRecord): void {
+	try {
+		writeFileAtomic(workerFileFor(dir, nodeId), `${JSON.stringify(record)}\n`);
+	} catch {
+		/* an unwritable worker-record location is not a phase failure */
+	}
+}
+
+/** Read a node's worker record, or undefined when absent/unreadable/malformed. */
+export function readWorkerRecord(dir: string, nodeId: string): WorkerRecord | undefined {
+	try {
+		const rec = JSON.parse(fs.readFileSync(workerFileFor(dir, nodeId), "utf-8")) as WorkerRecord;
+		return rec && typeof rec === "object" && typeof rec.pid === "number" ? rec : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * How a worker settled, as observed by the process that watched it. Written at
+ * settle time (see `finish` in runner-core.ts) so a completion survives an
+ * orchestrator that dies before it next checkpoints the run.
+ */
+export interface OutcomeRecord {
+	/** How the observing process classified the completion. */
+	completionSource: NonNullable<RunResult["completionSource"]>;
+	exitCode: number;
+	/** Terminating signal, when the child was killed rather than exiting. */
+	signal?: string;
+	startedAt: number;
+	endedAt: number;
+	/** The observed child's pid (its process-group leader on POSIX). */
+	pid?: number;
+}
+
+/** Write a node's outcome record atomically, at the path its readers resolve.
+ *  Fail-open by contract: a record that cannot be written must not change the
+ *  phase's result. */
+export function writeOutcomeRecord(dir: string, nodeId: string, record: OutcomeRecord): void {
+	try {
+		writeFileAtomic(outcomeFileFor(dir, nodeId), `${JSON.stringify(record)}\n`);
+	} catch {
+		/* an unwritable outcome location is not a phase failure */
+	}
+}
+
+/** Read a node's outcome record, or undefined when absent/unreadable/malformed. */
+export function readOutcomeRecord(dir: string, nodeId: string): OutcomeRecord | undefined {
+	try {
+		const rec = JSON.parse(fs.readFileSync(outcomeFileFor(dir, nodeId), "utf-8")) as OutcomeRecord;
+		return rec && typeof rec === "object" && typeof rec.completionSource === "string" ? rec : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * What a node whose stored status is `running` is *actually* doing, decided on
+ * reattach (design D5). `orphaned` is a state of its own: the observer died
+ * before it could record how the worker settled, and inventing `failed` or
+ * `done` there would be a guess.
+ */
+export type ReattachState = "running" | "finished-unrecorded" | "orphaned";
+
+/**
+ * Classify a stored node on reattach. Pure over its three inputs so it is
+ * testable without processes: the stored phase, the node's outcome record (if
+ * any), and a liveness probe for the worker's process group.
+ *
+ * Returns `undefined` when the stored status already agrees with what is on
+ * disk — a node that is not `running` has nothing to reconcile, even if its
+ * outcome record is present.
+ *
+ * `probe` is only called when it can change the answer (no outcome record), so
+ * a settled node costs no syscall.
+ */
+export function classifyReattach(
+	phase: Pick<PhaseState, "status">,
+	outcome: OutcomeRecord | undefined,
+	probe: () => boolean,
+): ReattachState | undefined {
+	if (phase.status !== "running") return undefined;
+	if (outcome) return "finished-unrecorded";
+	return probe() ? "running" : "orphaned";
+}
+
+/**
+ * A node's work verdict (design D6), reported with its default made explicit:
+ * absent means undetermined, never inferred from a clean process exit.
+ */
+export type WorkVerdict = "accepted" | "rejected" | "undetermined";
+
+/** Report a phase's work verdict, defaulting an absent field to `undetermined`. */
+export function phaseVerdict(phase: Pick<PhaseState, "verdict">): WorkVerdict {
+	return phase.verdict ?? "undetermined";
+}
+
+/**
+ * Derive the verdict an explicit check assigns to a phase (D6). A gate (or
+ * approval) decision is authoritative when present. Absent a gate, a `script`
+ * phase's own deterministic pass/fail IS its acceptance check — unlike a
+ * subagent's exit code, which says nothing about whether the work is good.
+ * Every other phase type/outcome returns `undefined`: no explicit check ran,
+ * so the verdict stays undetermined. Pure — callers merge the result onto a
+ * `PhaseState` themselves and never let it touch `status`/`error`/`completionSource`.
+ */
+export function deriveVerdict(
+	phaseType: string,
+	gate: { verdict: "pass" | "block" } | undefined,
+	status: PhaseStatus,
+): "accepted" | "rejected" | undefined {
+	if (gate) return gate.verdict === "pass" ? "accepted" : "rejected";
+	if (phaseType === "script") {
+		if (status === "done") return "accepted";
+		if (status === "failed") return "rejected";
+	}
+	return undefined;
+}
+
+/** Whether a recorded worker's process group is still alive. POSIX probes the
+ *  whole group (negative pid: the child leads its own group); Windows has only
+ *  the pid. `unknown` (EPERM, foreign error) counts as alive — a node is never
+ *  called orphaned on a guess. */
+function workerGroupAlive(rec: WorkerRecord): boolean {
+	const liveness = rec.pgid === undefined
+		? probeProcess(rec.pid)
+		: probeProcess(rec.pgid, (p, signal) => process.kill(-p, signal));
+	return liveness !== "dead";
+}
+
+/**
+ * Reconcile one loaded, stored-`running` phase against the records its worker
+ * left on disk (D5). Mutates in place. A phase for which neither record exists
+ * (a legacy run, or a worker whose records could not be written) is left
+ * exactly as stored — nothing is inferred from an absence of evidence.
+ */
+function reconcileLoadedPhase(phase: PhaseState, dir: string, nodeId: string): void {
+	const outcome = readOutcomeRecord(dir, nodeId);
+	const worker = outcome ? undefined : readWorkerRecord(dir, nodeId);
+	if (!outcome && !worker) return;
+	const state = classifyReattach(phase, outcome, () => (worker ? workerGroupAlive(worker) : false));
+	// `running` is the stored status already; only the two anomalies are marked.
+	if (state !== "finished-unrecorded" && state !== "orphaned") return;
+	phase.reattach = state;
+	// Orphaned: the observer died before recording how the worker settled, so the
+	// stored status stands and the state itself is what gets reported.
+	if (!outcome) return;
+	phase.completionSource = outcome.completionSource;
+	phase.endedAt ??= outcome.endedAt;
+	const clean = outcome.exitCode === 0 && !outcome.signal &&
+		(outcome.completionSource === "process-exit" || outcome.completionSource === "terminal-reap");
+	phase.status = clean ? "done" : "failed";
+	if (!clean && !phase.error) {
+		const how = outcome.signal ? `signal ${outcome.signal}` : `exit ${outcome.exitCode}`;
+		phase.error = `Worker settled as ${outcome.completionSource} (${how}) with no result recorded`;
+	}
+}
+
+/** Apply reattach reconciliation to every stored-`running` phase of a loaded
+ *  run. Returns the same object (mutated). */
+function reconcileRunPhases(state: RunState, runsRoot: string): RunState {
+	if (!state.phases || typeof state.phases !== "object") return state;
+	const dir = transcriptDirFor(runsRoot, state.flowName, state.runId);
+	for (const [nodeId, phase] of Object.entries(state.phases)) {
+		if (phase?.status === "running") reconcileLoadedPhase(phase, dir, nodeId);
+	}
+	return state;
 }
 
 /** Return the path to the run index file. */
@@ -2093,7 +2309,7 @@ export function loadRunDiagnosed(cwd: string, runId: string): LoadResult<RunStat
 	const probe = (filePath: string): RunState | undefined => {
 		const r = tryReadRunFile(root, filePath);
 		// A filename/index record must never alias a different run's state.
-		if (r.ok) return r.value.runId === runId ? r.value : undefined;
+		if (r.ok) return r.value.runId === runId ? reconcileRunPhases(r.value, root) : undefined;
 		if (r.reason === "unparseable" && !corrupt) corrupt = r;
 		return undefined;
 	};
@@ -2237,7 +2453,9 @@ export function listRuns(cwd: string, limit = 20): RunState[] {
 	for (const e of valid) {
 		if (runs.length >= targetLimit) break;
 		const loaded = tryReadRunFile(root, runIndexFilePath(root, e.relPath));
-		if (loaded.ok && loaded.value.runId === e.runId) runs.push(loaded.value);
+		// Reconciled like loadRun: a listing must not show an orphaned or
+		// finished-unrecorded node as plainly running (D5).
+		if (loaded.ok && loaded.value.runId === e.runId) runs.push(reconcileRunPhases(loaded.value, root));
 	}
 
 	// F-010: filter out records with non-numeric/NaN updatedAt.

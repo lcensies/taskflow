@@ -22,6 +22,7 @@ import {
 	registerDetachedProcessTreeFromEnv,
 	unregisterDetachedProcessTreeFromEnv,
 } from "./detached-control.ts";
+import { writeOutcomeRecord, writeWorkerRecord } from "./store.ts";
 
 // Re-export the host-neutral execution contract types so importers of the
 // runner surface get them from one place.
@@ -534,6 +535,14 @@ export interface RunSubagentProcessOptions<TAcc extends SubagentAccumulator> {
 	canDiscardOversizedLine?: (acc: TAcc, prefix: string) => boolean;
 	/** Synchronous notification at the terminal-reap linearization point. */
 	onTerminalCommit?: () => void;
+	/** Durable outcome record (opt-in). With both set, the process that observed
+	 * the child records its process identity at `workerFileFor(outcomeDir, nodeId)`
+	 * when it spawns, and how it settled at `outcomeFileFor(outcomeDir, nodeId)`
+	 * before this call resolves, so neither a live worker nor a completion is lost
+	 * if the orchestrator dies. Fail-open: an unwritable location leaves the
+	 * RunResult unchanged. */
+	outcomeDir?: string;
+	nodeId?: string;
 	/** Fail closed when the CLI exits zero before its authoritative terminal event. */
 	requireTerminalEvent?: boolean;
 	terminalEventLabel?: string;
@@ -599,6 +608,9 @@ export async function runSubagentProcess<TAcc extends SubagentAccumulator>(
 		}
 	}
 
+	const startedAt = Date.now();
+	let endedAt = startedAt;
+	let childPid: number | undefined;
 	const exitCode = await new Promise<number>((resolve) => {
 		const proc = spawn(bin, args, {
 			cwd,
@@ -612,6 +624,17 @@ export async function runSubagentProcess<TAcc extends SubagentAccumulator>(
 			windowsHide: true,
 		});
 		if (proc.pid) registerProcessTree(proc.pid);
+		childPid = proc.pid;
+		if (proc.pid && opts.outcomeDir && opts.nodeId) {
+			// Record the group before any output, so a process that attaches later can
+			// probe a node still marked running. Fail-open.
+			writeWorkerRecord(opts.outcomeDir, opts.nodeId, {
+				pid: proc.pid,
+				// `detached` above makes the child its own group leader on POSIX.
+				...(process.platform !== "win32" ? { pgid: proc.pid } : {}),
+				startedAt,
+			});
+		}
 
 		let buffer = "";
 		let discardingOversizedLine = false;
@@ -931,6 +954,7 @@ export async function runSubagentProcess<TAcc extends SubagentAccumulator>(
 
 		const finish = (code: number, signal?: NodeJS.Signals | null) => {
 			if (settled) return;
+			endedAt = Date.now();
 			// Flush decoders and classify the final unterminated record before
 			// settling. Any force-kill timer created by a malformed tail is cleared
 			// below, so no signal can fire after this Promise resolves.
@@ -1049,7 +1073,7 @@ export async function runSubagentProcess<TAcc extends SubagentAccumulator>(
 		result.stopReason = "error";
 		result.errorMessage = `Subagent killed by signal ${killedBySignal}`;
 	}
-	result.completionSource = protocolError
+	const completionSource: NonNullable<RunResult["completionSource"]> = protocolError
 		? "protocol-error"
 		: idleTimedOut
 			? "idle-timeout"
@@ -1060,6 +1084,7 @@ export async function runSubagentProcess<TAcc extends SubagentAccumulator>(
 					: killedBySignal && killReason !== "fatal-error"
 						? "external-signal"
 						: "process-exit";
+	result.completionSource = completionSource;
 	if (terminalCommitted) {
 		result.reapedAfterTerminal = reapedAfterTerminal;
 		result.terminalGraceMs = completionPolicy?.terminalGraceMs;
@@ -1082,6 +1107,19 @@ export async function runSubagentProcess<TAcc extends SubagentAccumulator>(
 			}
 		}
 		if (result.errorMessage) result.errorMessage = sanitizeErrorMessage(result.errorMessage);
+	}
+
+	if (opts.outcomeDir && opts.nodeId) {
+		// The observer records the outcome before handing the result back, so work
+		// that happened survives an orchestrator that dies first. Fail-open.
+		writeOutcomeRecord(opts.outcomeDir, opts.nodeId, {
+			completionSource,
+			exitCode: result.exitCode,
+			...(killedBySignal ? { signal: killedBySignal } : {}),
+			startedAt,
+			endedAt,
+			...(childPid ? { pid: childPid } : {}),
+		});
 	}
 
 	return result;
