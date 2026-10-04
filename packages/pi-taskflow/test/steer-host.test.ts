@@ -179,6 +179,11 @@ test("inspector: only unfinished phases are steerable", () => {
 	assert.equal(isSteerable(undefined), true, "a phase with no state yet is pending");
 	assert.equal(isSteerable({ id: "p", status: "done" }), false);
 	assert.equal(isSteerable({ id: "p", status: "failed" }), false);
+	assert.equal(
+		isSteerable({ id: "p", status: "running", reattach: "orphaned" }),
+		false,
+		"an orphaned node reads 'running' but its worker is gone (7.1)",
+	);
 });
 
 test("inspector: detail shows the activity history and Enter/Esc navigate", () => {

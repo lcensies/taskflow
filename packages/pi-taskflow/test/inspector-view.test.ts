@@ -139,6 +139,46 @@ test("inspector phases: 30 phases are all reachable and every line fits the widt
 	}
 });
 
+test("inspector phases: orphaned and finished-unrecorded render distinctly from running (7.1)", () => {
+	const phases: RunState["phases"] = {
+		live: { id: "live", status: "running" },
+		ghost: { id: "ghost", status: "running", reattach: "orphaned" },
+		recovered: {
+			id: "recovered",
+			status: "done",
+			completionSource: "process-exit",
+			reattach: "finished-unrecorded",
+		},
+	};
+	const view = new InspectorComponent(
+		mkRun(phases, ["live", "ghost", "recovered"]),
+		theme,
+		() => {},
+		true,
+		undefined,
+		() => 20,
+	);
+	try {
+		const lines = view.render(100).join("\n").split("\n");
+		const liveLine = lines.find((l) => l.includes(" live"))!;
+		const ghostLine = lines.find((l) => l.includes(" ghost"))!;
+		const recoveredLine = lines.find((l) => l.includes(" recovered"))!;
+		assert.ok(liveLine && ghostLine && recoveredLine, "all three phase rows render");
+
+		// Distinct glyphs: a still-running node, an orphaned one, and one adopted
+		// from an outcome record all read differently — none of the three looks
+		// like plain "running".
+		assert.match(ghostLine, /⚠/, "orphaned gets its own glyph");
+		assert.match(ghostLine, /orphaned/, "orphaned gets its own label");
+		assert.doesNotMatch(ghostLine, /▸/, "an orphaned node is not shown as actively running");
+		assert.match(recoveredLine, /⟲/, "finished-unrecorded gets its own glyph");
+		assert.match(recoveredLine, /unrecorded/, "finished-unrecorded gets its own label");
+		assert.doesNotMatch(liveLine, /orphaned|unrecorded/, "a genuinely running node carries neither marker");
+	} finally {
+		view.dispose();
+	}
+});
+
 test("inspector detail: renders the node's transcript", () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tf-inspector-"));
 	try {

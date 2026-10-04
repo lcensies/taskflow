@@ -47,7 +47,7 @@ import { type TraceEvent, type TraceSink } from "./trace.ts";
 export { parseGateVerdict };
 import { runCodeCompilesScorer } from "./scorer-runtime.ts";
 import { buildReflexionSummary, isContractViolation, REFLEXION_SENTINEL, type ReflexionInput } from "./reflexion.ts";
-import { hashInput, newRunId, type PhaseState, type RunState, runsDir, transcriptFileFor } from "./store.ts";
+import { deriveVerdict, hashInput, newRunId, type PhaseState, type RunState, runsDir, transcriptFileFor } from "./store.ts";
 import { resolveFinalOutput } from "./final-output.ts";
 import { CacheStore, resolveFingerprint } from "./cache.ts";
 import { compileTaskflowToIR, phaseFingerprint } from "./flowir/index.ts";
@@ -303,6 +303,9 @@ function resultToPhaseState(id: string, r: RunResult, inputHash: string, parseJs
 		attempts: attempts > 1 ? attempts : undefined,
 		timedOut: r.phaseTimeout || undefined,
 		error: failed ? r.errorMessage || r.stderr || r.output : undefined,
+		// Host-reported non-fatal diagnostics (e.g. a tmux viewer window that could
+		// not be opened) ride along as warnings and change nothing else.
+		warnings: r.warnings?.length ? [...r.warnings] : undefined,
 		inputHash,
 		endedAt: Date.now(),
 	};
@@ -1191,6 +1194,11 @@ async function executePhase(
 		throw e;
 	}
 	if (threw) return result; // unreachable; satisfies TS
+	// Work verdict (D6): derived from an explicit check only, never from the
+	// process outcome above. Merged in one place so every gate/script code path
+	// upstream gets it without each one repeating the mapping.
+	const verdict = deriveVerdict(phase.type ?? "agent", result.gate, result.status);
+	if (verdict) result.verdict = verdict;
 	if (promptCalls.length > 0 && !result.cacheHit) {
 		setPromptStats(result, promptCalls);
 	}
@@ -1769,6 +1777,7 @@ async function executePhaseInner(
 				deps.steerDir && ctxNodeId ? steerFileFor(deps.steerDir, ctxNodeId) : undefined,
 			transcriptFile:
 				deps.transcriptDir && ctxNodeId ? transcriptFileFor(deps.transcriptDir, ctxNodeId) : undefined,
+			workerWindow: phase.workerWindow,
 			idleTimeoutMs: effIdleTimeoutMs,
 			onTerminalCommit,
 		};

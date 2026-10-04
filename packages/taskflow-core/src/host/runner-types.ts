@@ -70,6 +70,11 @@ export interface RunResult {
 	reapedAfterTerminal?: boolean;
 	/** Grace window used by the host's terminal completion policy. */
 	terminalGraceMs?: number;
+	/** Non-fatal host diagnostics for this call (e.g. the tmux viewer window
+	 *  could not be opened). Merged into `PhaseState.warnings`; they never affect
+	 *  the exit code, the completion classification, or anything else the engine
+	 *  decides from. */
+	warnings?: string[];
 	/** @internal Set by the resolve-only workspace coordinator only after a
 	 * durable mutation intent has been prepared. Runtime retry diagnostics use
 	 * this to distinguish a possibly-mutating failure from lease/admission
@@ -121,6 +126,12 @@ export interface RunOptions {
 	 * (fail-open: transcript capture is simply unavailable).
 	 */
 	transcriptFile?: string;
+	/**
+	 * Worker window override (optional). `false` suppresses this node's tmux
+	 * viewer window, `true` forces it; undefined leaves the decision to the
+	 * host's `taskflow.workerWindows` setting, which defaults to off (opt-in).
+	 */
+	workerWindow?: boolean;
 	/** @internal Host-to-runtime linearization hook. Process runners call this
 	 * synchronously when a terminal candidate is irreversibly committed, before
 	 * sending reap signals. Flow data cannot provide this callback. */

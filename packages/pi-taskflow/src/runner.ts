@@ -27,6 +27,7 @@ import {
 	CWD_BRIDGE_MODE_ENV,
 	WORKSPACE_RECONCILE_MODE_ENV,
 } from "taskflow-core";
+import { WORKER_WINDOW_UNAVAILABLE_WARNING, openWorkerWindowForTranscript } from "./tmux-viewer.ts";
 
 // Re-export the host-neutral execution contract + pure helpers so every existing
 // `import { RunResult, isFailed, foldEventLine, … } from "./runner.ts"` keeps
@@ -238,7 +239,10 @@ const TRANSCRIPT_MAX_BYTES = 16 * 1024 * 1024;
  * ponytail: the cap counts the file's size at open + what we write, so retries
  * appending to the same file stay bounded; no rotation.
  */
-function openTranscriptTee(file: string): { onRawLine: (line: string) => void; close: () => void } | undefined {
+function openTranscriptTee(
+	file: string,
+	windowOverride?: boolean,
+): { onRawLine: (line: string) => void; close: () => void; warning?: string } | undefined {
 	let written = 0;
 	let stream: fs.WriteStream;
 	try {
@@ -265,8 +269,21 @@ function openTranscriptTee(file: string): { onRawLine: (line: string) => void; c
 			writable = false;
 		}
 	};
-	return {
-		onRawLine(line) {
+	let windowTried = false;
+	const tee = {
+		/** Set when this node's viewer window could not be opened — the caller turns
+		 *  it into a phase `warnings` entry and changes nothing else. */
+		warning: undefined as string | undefined,
+		onRawLine(line: string) {
+			// First output is the moment this node becomes worth watching: open its
+			// tmux viewer window (opt-in, idempotent, capped, fail-open — see
+			// tmux-viewer.ts).
+			if (!windowTried) {
+				windowTried = true;
+				if (openWorkerWindowForTranscript(file, { enabled: windowOverride }) === "unavailable") {
+					tee.warning = WORKER_WINDOW_UNAVAILABLE_WARNING;
+				}
+			}
 			if (!writable) return;
 			const chunk = `${line}\n`;
 			written += Buffer.byteLength(chunk);
@@ -286,6 +303,7 @@ function openTranscriptTee(file: string): { onRawLine: (line: string) => void; c
 			}
 		},
 	};
+	return tee;
 }
 
 interface PiEventAccumulator extends EventAccumulator {
@@ -476,7 +494,7 @@ export async function runAgentTask(
 	let tmpPromptPath: string | null = null;
 
 	const acc = newPiAccumulator(model);
-	const transcript = opts.transcriptFile ? openTranscriptTee(opts.transcriptFile) : undefined;
+	const transcript = opts.transcriptFile ? openTranscriptTee(opts.transcriptFile, opts.workerWindow) : undefined;
 
 	try {
 		const ctxEnabled = Boolean(opts.ctxDir && opts.nodeId);
@@ -560,6 +578,9 @@ export async function runAgentTask(
 		if (acc.truncated) {
 			result.output += "\n\n[...output truncated after 500 messages]";
 		}
+		// A viewer window that never opened is a diagnostic, not a failure: it rides
+		// out as a warning and nothing else about the result changes.
+		if (transcript?.warning) result.warnings = [...(result.warnings ?? []), transcript.warning];
 		return result;
 	} finally {
 		transcript?.close();

@@ -12,6 +12,7 @@
 
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { resolve as resolvePath } from "node:path";
+import { spawn } from "node:child_process";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { type KeyId, Text } from "@earendil-works/pi-tui";
@@ -684,6 +685,14 @@ async function runFlow(
 	// shortcut + overlay is the only surface that can reach a run in flight).
 	setActiveRun(state, ctx.cwd);
 
+	// Progress line: host footer (`ctx.ui.setStatus`) plus, inside tmux, the
+	// workmux sidebar row for this pane. Both are advisory, so every failure is
+	// swallowed and neither can fail a run.
+	const status = statusPublisher(ctx, state.flowName);
+	status.update(state);
+	const statusTicker = setInterval(() => status.update(state), 1000);
+	(statusTicker as { unref?: () => void }).unref?.();
+
 	// Every emit re-renders the whole tool card (progress block + activity +
 	// result). The heartbeat below ticks at 8fps regardless of activity, so
 	// without this gate a quiet run repaints the card ~8×/s for nothing —
@@ -868,10 +877,48 @@ async function runFlow(
 		return result;
 	} finally {
 		if (heartbeat) clearInterval(heartbeat);
+		clearInterval(statusTicker);
+		status.clear();
 		clearActiveRun(state);
 		saveRun(state, cleanupConfig); // force-persist terminal state
 		emit(state); // final render reflecting terminal state
 	}
+}
+
+/** Run-progress label for the two ambient surfaces: the host's own footer and,
+ *  when the session sits in a tmux pane, the workmux sidebar row for that pane
+ *  (`workmux signal activity`). Advisory only — a missing workmux, a pane
+ *  workmux has no record for, or a spawn failure all degrade to "no label". */
+function statusPublisher(ctx: Pick<ExtensionContext, "ui" | "hasUI">, flowName: string) {
+	let last = "";
+	const sidebar = (args: string[]) => {
+		if (!process.env.TMUX_PANE) return;
+		try {
+			// ENOENT arrives as an async 'error' event, not a throw, so the
+			// listener (not the catch) is what keeps a missing workmux advisory.
+			const p = spawn("workmux", ["signal", "activity", ...args], { stdio: "ignore", detached: true });
+			p.on("error", () => {});
+			p.unref();
+		} catch {
+			/* no workmux on PATH */
+		}
+	};
+	return {
+		update(state: RunState) {
+			if (state.status !== "running") return;
+			const label = `tf:${flowName} ${summarizeRun(state)}`;
+			if (label === last) return;
+			last = label;
+			if (ctx.hasUI) ctx.ui.setStatus("taskflow", label);
+			sidebar(["--label", label]);
+		},
+		clear() {
+			if (!last) return;
+			last = "";
+			if (ctx.hasUI) ctx.ui.setStatus("taskflow", undefined);
+			sidebar(["--clear"]);
+		},
+	};
 }
 
 /** Minimal host context both the `/tf runs` command and the inspector shortcut

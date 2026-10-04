@@ -14,7 +14,7 @@
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { isKeyRelease, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { type Phase, type PhaseState, type RunState, splitItems } from "taskflow-core";
+import { type Phase, type PhaseState, type ReattachState, type RunState, splitItems } from "taskflow-core";
 import { backEdgeAnnotation } from "./render.ts";
 import { ScrollPane } from "./scroll-pane.ts";
 import { renderTranscript, TranscriptTail } from "./transcript-view.ts";
@@ -73,8 +73,11 @@ export function boxRule(width: number, left: string, right: string, theme: Theme
 	return theme.fg("border", left + "─".repeat(Math.max(0, width - 2)) + right);
 }
 
-/** Phases whose subagent can still receive a message. */
+/** Phases whose subagent can still receive a message. An orphaned node's
+ *  stored status may still read `running`, but its worker is gone — nothing
+ *  is listening on the other end of the steer channel. */
 export function isSteerable(ps: PhaseState | undefined): boolean {
+	if (ps?.reattach === "orphaned") return false;
 	const status = ps?.status ?? "pending";
 	return status === "running" || status === "pending";
 }
@@ -128,7 +131,13 @@ export function agentRows(ps: PhaseState | undefined): AgentRow[] {
 	return rows;
 }
 
-function statusBadge(status: string, theme: Theme): string {
+function statusBadge(status: string, theme: Theme, reattach?: ReattachState): string {
+	// Reattach reconciliation (D5) takes precedence: an orphaned node's stored
+	// status is still "running", but it is NOT running — and a finished node
+	// adopted from an outcome record is worth flagging as recovered rather than
+	// rendering identically to a node the run itself completed.
+	if (reattach === "orphaned") return theme.fg("error", "⚠");
+	if (reattach === "finished-unrecorded") return theme.fg("warning", "⟲");
 	if (status === "done") return theme.fg("success", "✓");
 	if (status === "failed") return theme.fg("error", "✗");
 	if (status === "running") return theme.fg("warning", "◐");
@@ -143,18 +152,26 @@ function phaseLine(
 	planned?: string,
 ): string {
 	const status = ps?.status ?? "pending";
-	const badge = statusBadge(status, theme);
+	const reattach = ps?.reattach;
+	const badge = statusBadge(status, theme, reattach);
 	// Current-stage marker, distinct from the status glyph so it survives a scan
-	// of a long list and marks every concurrently running phase.
-	const now = status === "running" ? theme.fg("warning", "▸") : " ";
+	// of a long list and marks every concurrently running phase. An orphaned node
+	// reads "running" in stored status but is not actually in flight — no marker.
+	const now = status === "running" && !reattach ? theme.fg("warning", "▸") : " ";
 	const label = phase.label ?? phase.id;
 	const sub = ps?.subProgress;
 	const fanout = sub ? theme.fg("muted", ` ${sub.done}/${sub.total}`) : "";
+	const reattachNote =
+		reattach === "orphaned"
+			? theme.fg("error", " orphaned")
+			: reattach === "finished-unrecorded"
+				? theme.fg("warning", " unrecorded")
+				: "";
 	const steered = ps?.steered ? theme.fg("accent", " ⇢") : "";
 	const role = phase.agent ?? phase.type ?? "agent";
 	const model = ps?.model ? shortModel(ps.model) : planned ? `~${shortModel(planned)}` : "";
 	const who = theme.fg("dim", `  ${role}${model ? `（${model}）` : ""}`);
-	return `${now}${badge} ${label}${fanout}${steered}${who}${backEdgeAnnotation(phase, ps, theme)}`;
+	return `${now}${badge} ${label}${fanout}${reattachNote}${steered}${who}${backEdgeAnnotation(phase, ps, theme)}`;
 }
 
 function shortModel(model: string): string {
