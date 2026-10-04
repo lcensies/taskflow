@@ -87,7 +87,7 @@ test("upgradeTraceEvent: fills defaults for missing fields", () => {
 	// runId/phaseId fall back to ""
 	assert.equal(upgraded.runId, "");
 	assert.equal(upgraded.phaseId, "");
-	// unknown kind falls back to "phase-start"
+	// missing kind falls back to "phase-start"
 	assert.equal(upgraded.kind, "phase-start");
 	// optional fields remain undefined
 	assert.equal(upgraded.input, undefined);

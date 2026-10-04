@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { foldEvents, type FoldedRun } from "../src/exec/fold.ts";
 import type { Event } from "../src/exec/events.ts";
-import { EVENT_SCHEMA_VERSION } from "../src/exec/events.ts";
+import { EVENT_SCHEMA_VERSION, readEvents } from "../src/exec/events.ts";
 
 function ev(partial: Partial<Event> & Pick<Event, "kind" | "phaseId">): Event {
 	const { kind, phaseId, ...rest } = partial;
@@ -90,4 +90,34 @@ test("foldEvents: empty / orphan events are tolerated", () => {
 	const run = foldEvents([]);
 	assert.equal(run.eventCount, 0);
 	assert.deepEqual(run.phases, {});
+});
+
+// An unknown kind must be inert so a trace from a newer runtime (new worker
+// lifecycle kinds) folds identically to one without those lines.
+test("foldEvents: an unknown kind folds exactly like the trace without that line", () => {
+	const start = ev({ kind: "phase-start", phaseId: "p1", ts: 1 });
+	const end = ev({ kind: "phase-end", phaseId: "p1", ts: 3, status: "done" });
+	const unknown = ev({
+		kind: "worker-window-opened" as Event["kind"],
+		phaseId: "p-from-the-future",
+		ts: 2,
+		runId: "run-from-the-future",
+	});
+
+	const withUnknown = foldEvents([start, unknown, end]);
+	assert.deepEqual(withUnknown, foldEvents([start, end]));
+});
+
+test("readEvents + foldEvents: a legacy unknown-kind line is preserved and inert", () => {
+	const known = [
+		{ ts: 1, runId: "r", phaseId: "p1", kind: "phase-start" },
+		{ ts: 3, runId: "r", phaseId: "p1", kind: "phase-end", status: "done" },
+	];
+	const unknown = { ts: 2, runId: "r", phaseId: "p1", kind: "worker-spawned", pid: 42 };
+	const jsonl = (rows: unknown[]) => rows.map((r) => JSON.stringify(r)).join("\n") + "\n";
+
+	const all = readEvents(jsonl([known[0], unknown, known[1]]));
+	// upgradeTraceEvent must not coerce the unknown kind into "phase-start"
+	assert.equal(all[1].kind, "worker-spawned");
+	assert.deepEqual(foldEvents(all), foldEvents(readEvents(jsonl(known))));
 });
