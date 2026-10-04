@@ -196,10 +196,13 @@ test("mcp: taskflow_verify with a missing defineFile returns a clear error", asy
 test("mcp: defineFile cannot escape cwd or the OS temp directory", async (t) => {
 	const fs = await import("node:fs");
 	const path = await import("node:path");
-	const outside = process.platform === "win32"
+	const fixture = process.platform === "win32"
 		? path.join(process.env.SystemRoot ?? "C:\\Windows", "win.ini")
 		: "/etc/hosts";
-	if (!fs.existsSync(outside)) return t.skip(`no stable outside fixture at ${outside}`);
+	if (!fs.existsSync(fixture)) return t.skip(`no stable outside fixture at ${fixture}`);
+	// Resolve symlinks: distros where /etc/hosts is a link (NixOS) would otherwise
+	// trip the symlink-leaf rejection before the containment check under test.
+	const outside = fs.realpathSync(fixture);
 	const [res] = await rpcRoundtrip([
 		{
 			jsonrpc: "2.0",
