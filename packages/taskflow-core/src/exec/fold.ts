@@ -38,9 +38,12 @@ export interface FoldedRun {
 	phases: Record<string, FoldedPhase>;
 	/** Events that could not be associated with a phaseId (malformed). */
 	orphans: number;
-	/** Total events folded. */
+	/** Events actually folded — unknown kinds are skipped and not counted. */
 	eventCount: number;
 }
+
+/** Kinds this fold interprets. Anything else is inert (forward compatibility). */
+const KNOWN_KINDS = new Set<string>(["phase-start", "phase-end", "subagent-call", "decision"]);
 
 function emptyPhase(phaseId: string): FoldedPhase {
 	return {
@@ -70,17 +73,25 @@ function addUsage(a: UsageStats, b: UsageStats | undefined): void {
 /**
  * Reduce an ordered event list into a per-phase snapshot.
  * Accepts {@link Event} (with `v`) or plain TraceEvent-shaped records.
+ *
+ * An event whose `kind` this fold does not know is **inert**: it contributes
+ * nothing — no phase, no runId, no count — so a trace written by a newer
+ * runtime folds exactly like the same trace with those lines removed.
  */
 export function foldEvents(events: readonly Event[]): FoldedRun {
 	const phases: Record<string, FoldedPhase> = {};
 	let runId = "";
 	let orphans = 0;
+	let eventCount = 0;
 
 	for (const ev of events) {
 		if (!ev || typeof ev !== "object") {
 			orphans++;
+			eventCount++;
 			continue;
 		}
+		if (!KNOWN_KINDS.has(ev.kind as string)) continue;
+		eventCount++;
 		if (typeof ev.runId === "string" && ev.runId) runId = ev.runId;
 		const phaseId = typeof ev.phaseId === "string" ? ev.phaseId : "";
 		if (!phaseId) {
@@ -135,5 +146,5 @@ export function foldEvents(events: readonly Event[]): FoldedRun {
 		}
 	}
 
-	return { runId, phases, orphans, eventCount: events.length };
+	return { runId, phases, orphans, eventCount };
 }

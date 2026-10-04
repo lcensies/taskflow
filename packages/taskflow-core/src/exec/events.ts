@@ -84,11 +84,11 @@ export function upgradeTraceEvent(old: Record<string, unknown>): Event {
 		ts: typeof old.ts === "number" ? old.ts : 0,
 		runId: typeof old.runId === "string" ? old.runId : "",
 		phaseId: typeof old.phaseId === "string" ? old.phaseId : "",
-		kind: (["phase-start", "phase-end", "subagent-call", "decision"] as const).includes(
-			old.kind as EventKind,
-		)
-			? (old.kind as EventKind)
-			: "phase-start",
+		// An unknown kind is preserved verbatim rather than coerced: consumers
+		// treat it as inert (see foldEvents), whereas coercion would make a future
+		// runtime's lifecycle event masquerade as a phase-start. Only a
+		// missing/non-string kind gets the default.
+		kind: typeof old.kind === "string" ? (old.kind as EventKind) : "phase-start",
 		dependencies: Array.isArray(old.dependencies)
 			? old.dependencies.filter((x): x is string => typeof x === "string")
 			: undefined,
