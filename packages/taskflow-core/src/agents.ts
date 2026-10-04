@@ -47,6 +47,10 @@ export interface TaskflowSettings {
 	steering: boolean;
 	/** Key that opens the live inspector while a run holds the turn. */
 	inspectorShortcut: string;
+	/** tmux worker windows (design D8, revised: opt-in). Off by default: a
+	 *  node gets a viewer window on its first output only when explicitly
+	 *  enabled. A phase's `workerWindow` overrides this. */
+	workerWindows: boolean;
 }
 
 import { DEFAULT_KEPT_RUNS, DEFAULT_RUN_AGE_DAYS, writeFileAtomic } from "./store.ts";
@@ -61,6 +65,7 @@ export const DEFAULT_TASKFLOW_SETTINGS: TaskflowSettings = {
 	library: { ...DEFAULT_LIBRARY_SETTINGS },
 	piChild: { ...DEFAULT_PI_CHILD_SETTINGS, extensions: [] },
 	steering: true,
+	workerWindows: false,
 	// alt+<letter> is ESC-prefixed, so it survives tmux without extended-keys and
 	// is not grabbed by GNOME (which binds Ctrl+Alt+T to "open terminal").
 	inspectorShortcut: "alt+t",
@@ -115,6 +120,8 @@ export function normalizeTaskflowSettings(raw: unknown): TaskflowSettings {
 				? rec.maxRunAgeDays
 				: DEFAULT_TASKFLOW_SETTINGS.maxRunAgeDays,
 		steering: typeof rec.steering === "boolean" ? rec.steering : DEFAULT_TASKFLOW_SETTINGS.steering,
+		workerWindows:
+			typeof rec.workerWindows === "boolean" ? rec.workerWindows : DEFAULT_TASKFLOW_SETTINGS.workerWindows,
 		inspectorShortcut:
 			typeof rec.inspectorShortcut === "string" && rec.inspectorShortcut.trim()
 				? rec.inspectorShortcut.trim()

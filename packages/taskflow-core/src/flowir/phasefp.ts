@@ -59,8 +59,10 @@ import { canonicalJson, hashCanonical } from "./hash.ts";
  *   - `final`: marks which phase's output is the flow result; does not change
  *     the phase's own output.
  *   - `label`: a purely cosmetic display name (renderers/peek fall back to
- *     `id`); never observed by the subagent. */
-const PHASE_FP_STRIP = ["cache", "retry", "concurrency", "final", "label"] as const;
+ *     `id`); never observed by the subagent.
+ *   - `workerWindow`: whether a tmux viewer window is opened; a viewer cannot
+ *     change what the worker produces. */
+const PHASE_FP_STRIP = ["cache", "retry", "concurrency", "final", "label", "workerWindow"] as const;
 
 /** Clone a phase into a plain record with policy fields removed. */
 function stripPolicy(phase: Phase): Record<string, unknown> {

@@ -892,6 +892,7 @@ test("runInteractiveInit: 'Configure taskflow preferences' → disable built-ins
 		library: { enabled: true, scope: "both" },
 		piChild: { resourceProfile: "isolated", extensions: [], terminalGraceMs: 1500 },
 		steering: true,
+		workerWindows: false,
 		inspectorShortcut: "alt+t",
 	});
 });

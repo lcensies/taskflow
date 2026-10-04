@@ -174,6 +174,11 @@ const PhaseSchema = Type.Object(
 			Type.String({ description: "Human-readable display label (1-120 chars, no newline). Falls back to 'id' in renderers/peek. Does not affect caching or execution." }),
 		),
 		agent: Type.Optional(Type.String({ description: "Agent name to run this phase" })),
+		/** Per-phase override of the `taskflow.workerWindows` setting. Display-only,
+		 *  so it is stripped from the phase fingerprint (phasefp.ts PHASE_FP_STRIP). */
+		workerWindow: Type.Optional(
+			Type.Boolean({ description: "Open a tmux viewer window for this phase's workers. Overrides the taskflow.workerWindows setting (default: off — opt-in). Does not affect caching or execution." }),
+		),
 		task: Type.Optional(Type.String({ description: "Task prompt (supports interpolation placeholders)" })),
 		taskFile: Type.Optional(
 			Type.String({
