@@ -6,6 +6,7 @@
  * module only parses.
  */
 
+import * as fs from "node:fs";
 import { summarizeToolCall } from "./runner-core.ts";
 
 export interface TranscriptAttemptEntry {
@@ -121,4 +122,62 @@ export function parseTranscript(text: string): TranscriptEntry[] {
 		}
 	}
 	return entries;
+}
+
+/**
+ * Incremental reader for a transcript file: `poll()` stats the file and parses
+ * only the bytes appended since the last poll, stopping at the last complete
+ * line (so a half-written line is re-read next time). A missing or unreadable
+ * file yields no entries and never throws — a follower can poll before the
+ * worker has written anything.
+ */
+export class TranscriptTail {
+	private accumulated: TranscriptEntry[] = [];
+	private offset = 0;
+	readonly file: string;
+
+	constructor(file: string) {
+		this.file = file;
+	}
+
+	get entries(): TranscriptEntry[] {
+		return this.accumulated;
+	}
+
+	/** True when new entries were appended by this poll. */
+	poll(): boolean {
+		let size: number;
+		try {
+			size = fs.statSync(this.file).size;
+		} catch {
+			return false;
+		}
+		if (size < this.offset) {
+			// File was replaced/truncated — start over.
+			this.offset = 0;
+			this.accumulated = [];
+		}
+		if (size <= this.offset) return false;
+		let text: string;
+		try {
+			const fd = fs.openSync(this.file, "r");
+			try {
+				const buf = Buffer.allocUnsafe(size - this.offset);
+				const read = fs.readSync(fd, buf, 0, buf.length, this.offset);
+				text = buf.subarray(0, read).toString("utf8");
+			} finally {
+				fs.closeSync(fd);
+			}
+		} catch {
+			return false;
+		}
+		const cut = text.lastIndexOf("\n");
+		if (cut < 0) return false;
+		const complete = text.slice(0, cut + 1);
+		this.offset += Buffer.byteLength(complete);
+		const added = parseTranscript(complete);
+		if (!added.length) return false;
+		this.accumulated = this.accumulated.concat(added);
+		return true;
+	}
 }
