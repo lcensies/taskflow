@@ -495,6 +495,12 @@ Taskflow shares the subagent settings file at `~/.pi/agent/settings.json`:
   needs the Kitty keyboard protocol end to end (in tmux, `extended-keys on`), and
   desktop environments grab some of those combos before the terminal sees them
   (GNOME binds `Ctrl+Alt+T` to "open terminal").
+- `taskflow.workerWindows` (default `false`) is opt-in: when true, a node's
+  first output opens a tmux window `tf:<runId-short>:<nodeId>` running `peek
+  --follow` on its transcript, bounded by a per-run cap. A phase's
+  `workerWindow` field overrides the setting. tmux missing or unreachable fails
+  open: a `warnings` diagnostic on the phase, nothing else changes. Windows are
+  never closed when the worker finishes.
 <!-- /host:pi -->
 
 ---

@@ -776,6 +776,25 @@ A run moves through: **running →** `completed` (a `final` phase produced outpu
 **/** `blocked` (gate BLOCK, approval rejected, or `budget` hit) **/** `failed`
 (a non-`optional` phase errored) **/** `paused` (aborted).
 
+**Durable outcome + reattach.** When a subagent settles, the process that
+observed it durably records the outcome (`completionSource`, exit code or
+signal, timings) next to the node's transcript — before anything else happens,
+so the record survives even if the orchestrating process dies immediately
+after. Loading a run reconciles any node whose *stored* status is still
+`running` against that record (plus a liveness probe of the worker's process
+group) into exactly one of three states:
+
+| State | Meaning |
+|-------|---------|
+| `running` | no outcome record yet, and the worker's process group is still alive |
+| `finished-unrecorded` | an outcome record exists — the worker finished, but the last checkpoint never saw it; the node is reported finished from that record |
+| `orphaned` | no outcome record, and the worker's process group is gone — the work's fate is genuinely unknown |
+
+`orphaned` is a state of its own, never silently reported as `failed` or
+`completed` — and it is never auto-retried or auto-completed by `resume`. It
+surfaces so a human decides, the same way a crashed build leaves a stopped
+pipeline rather than guessing at an outcome.
+
 `taskflow_run` reports a `runId`. If the final output looks wrong, don't
 re-run blind — `taskflow_peek` the run: omit `phaseId` to list phase statuses
 and output sizes, then peek the suspicious phase (`json: true` for parsed
