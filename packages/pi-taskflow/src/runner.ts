@@ -105,6 +105,7 @@ export type PiInvocationProbe = {
 	execPath?: string;
 	platform?: NodeJS.Platform;
 	existsSync?: (p: string) => boolean;
+	realpathSync?: (p: string) => string;
 	resolveInstalledCli?: () => string | undefined;
 };
 
@@ -149,10 +150,21 @@ export function defaultResolveInstalledPiCli(exists: (p: string) => boolean = (c
  */
 export function resolveParentPiCliEntry(probe: PiInvocationProbe = {}): string | undefined {
 	const exists = probe.existsSync ?? ((p) => fs.existsSync(p));
+	const realpath = probe.realpathSync ?? ((p: string) => fs.realpathSync(p));
 	const currentScript = probe.currentScript ?? process.argv[1];
 	const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
-	if (currentScript && !isBunVirtualScript && PI_CLI_SCRIPT.test(currentScript) && exists(currentScript)) {
-		return currentScript;
+	if (currentScript && !isBunVirtualScript) {
+		if (PI_CLI_SCRIPT.test(currentScript) && exists(currentScript)) return currentScript;
+		// npm puts Pi on PATH as an extensionless symlink (bin/pi -> …/dist/cli.js)
+		// and argv[1] keeps the link. Missing it falls through to the Pi taskflow
+		// resolves for itself, which in a source checkout is its own dev
+		// dependency: children would run a different Pi than their parent.
+		try {
+			const target = realpath(currentScript);
+			if (PI_CLI_SCRIPT.test(target) && exists(target)) return target;
+		} catch {
+			/* not a path to a file */
+		}
 	}
 	const resolve = probe.resolveInstalledCli ?? (() => defaultResolveInstalledPiCli(exists));
 	return resolve() ?? undefined;
@@ -182,6 +194,7 @@ export function getPiInvocation(args: string[], probe: PiInvocationProbe = {}): 
 	const parent = resolveParentPiCliEntry({
 		currentScript: probe.currentScript ?? process.argv[1],
 		existsSync: exists,
+		realpathSync: probe.realpathSync,
 		resolveInstalledCli: probe.resolveInstalledCli,
 	});
 	if (parent) return { command: execPath, args: [parent, ...args] };

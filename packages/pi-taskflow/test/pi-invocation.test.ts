@@ -116,6 +116,20 @@ test("resolveParentPiCliEntry: prefers the live Pi CLI script", () => {
 	assert.equal(got, PI_CLI);
 });
 
+test("resolveParentPiCliEntry: follows npm's extensionless bin symlink to the running Pi", () => {
+	const bin = "/home/u/.npm-global/bin/pi";
+	const cli = "/home/u/.npm-global/lib/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js";
+	const got = getPiInvocation(ARGS, {
+		platform: "linux",
+		execPath: NODE_POSIX,
+		currentScript: bin,
+		existsSync: (p) => p === bin || p === cli,
+		realpathSync: (p) => (p === bin ? cli : p),
+		resolveInstalledCli: () => "/src/taskflow/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+	});
+	assert.deepEqual(got, { command: NODE_POSIX, args: [cli, ...ARGS] });
+});
+
 test("resolveParentPiCliEntry: ignores detached-runner argv[1]", () => {
 	const got = resolveParentPiCliEntry({
 		currentScript: DETACHED_RUNNER,
