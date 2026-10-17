@@ -366,33 +366,90 @@ test("steering: s at the agent level and in an item's detail steers the owning p
 	}
 });
 
-test("agentRows: labels and statuses come from the merged two-item output", () => {
-	const output = [
-		"### [1/2] reviewer\n\nlooks fine",
-		"### [2/2] auditor (failed)\n\nboom",
-	].join("\n\n---\n\n");
+test("agentRows: indexed states identify out-of-order, failed and skipped items", () => {
 	const rows = agentRows({
-		id: "p",
-		status: "running",
-		output,
-		subProgress: { done: 1, total: 2, running: 0, failed: 1 },
+		id: "p", status: "running", subProgress: { done: 2, total: 4, running: 1, failed: 1 },
+		items: [
+			{ agent: "slow", status: "running" },
+			{ agent: "cached", status: "done" },
+			{ agent: "skipped", status: "skipped" },
+			{ agent: "auditor", status: "failed" },
+		],
 	} as PhaseState);
-	assert.deepEqual(rows, [
-		{ index: 0, label: "reviewer", status: "done" },
-		{ index: 1, label: "auditor", status: "failed" },
+	assert.deepEqual(rows.map(({ label, status }) => [label, status]), [
+		["slow", "running"], ["cached", "done"], ["skipped", "skipped"], ["auditor", "failed"],
 	]);
 });
 
-test("agentRows: no output yet → positional statuses; no subProgress → []", () => {
+test("agentRows: legacy progress never guesses an item's status", () => {
 	assert.deepEqual(
-		agentRows({ id: "p", status: "running", subProgress: { done: 0, total: 2, running: 2, failed: 0 } } as PhaseState),
+		agentRows({ id: "p", status: "running", subProgress: { done: 1, total: 2, running: 1, failed: 0 } } as PhaseState),
 		[
-			{ index: 0, label: "item 1", status: "running" },
-			{ index: 1, label: "item 2", status: "running" },
+			{ index: 0, label: "item 1", status: "unknown", usage: undefined },
+			{ index: 1, label: "item 2", status: "unknown", usage: undefined },
 		],
 	);
 	assert.deepEqual(agentRows({ id: "p", status: "done", output: "plain" } as PhaseState), []);
 	assert.deepEqual(agentRows(undefined), []);
+	assert.deepEqual(agentRows({ id: "f", status: "running", subProgress: { done: 1, total: 2, running: 1, failed: 0 } } as PhaseState, "flow"), []);
+});
+test("inspector agents level: legacy items render unknown, distinct from pending", () => {
+	const run = mkRun({ fan: fanPhase, live: { id: "live", status: "running", subProgress: { done: 0, total: 1, running: 0, failed: 0 }, items: [{ agent: "a", status: "pending" }] } as PhaseState }, ["fan", "live"]);
+	for (const p of run.def.phases) p.type = "map";
+	const view = new InspectorComponent(run, theme, () => {}, true);
+	try {
+		view.handleInput("g");
+		view.handleInput("\r");
+		const legacy = view.render(80).join("\n");
+		assert.match(legacy, /\? \[1\] reviewer/);
+		assert.match(legacy, /\? \[2\] auditor/);
+		assert.doesNotMatch(legacy, /○ \[/, "legacy items are not drawn as pending");
+		view.handleInput("\x1b");
+		view.handleInput("j");
+		view.handleInput("\r");
+		assert.match(view.render(80).join("\n"), /○ \[1\] a/);
+	} finally {
+		view.dispose();
+	}
+});
+test("inspector agent usage: fresh and cached counts follow selected item", () => {
+	const run = mkRun({ fan: { id: "fan", status: "running", subProgress: { done: 0, total: 2, running: 2, failed: 0 }, items: [
+		{ agent: "a", status: "running", usage: { input: 3, output: 2, cacheWrite: 1, cacheRead: 40, cost: 0.00003, contextTokens: 0, turns: 1 } },
+		{ agent: "b", status: "running" },
+	] } as PhaseState }, ["fan"]);
+	run.def.phases[0].type = "map";
+	const view = new InspectorComponent(run, theme, () => {}, true);
+	try {
+		view.handleInput("\r");
+		assert.match(view.render(80).join("\n"), /6 tok · 40 cached/);
+		view.handleInput("\r");
+		assert.match(view.render(80).join("\n"), /6 tok · 40 cached · <\$0\.0001/);
+		assert.ok(view.render(40).every((line) => visibleWidth(line) <= 40));
+		view.handleInput("\x1b");
+		view.handleInput("j");
+		view.handleInput("\r");
+		const unmeasured = view.render(80).join("\n");
+		assert.doesNotMatch(unmeasured, /tok|cached|\$/, "unknown item usage is not shown as zero");
+	} finally {
+		view.dispose();
+	}
+});
+
+test("inspector phase detail: measured usage and tiny cost, nothing when unmeasured", () => {
+	const usage = { input: 1000, output: 500, cacheWrite: 0, cacheRead: 2000, cost: 0.00004, contextTokens: 0, turns: 1 };
+	const view = new InspectorComponent(mkRun({ p: { id: "p", status: "done", usage }, q: { id: "q", status: "running" } }, ["p", "q"]), theme, () => {}, true);
+	try {
+		view.handleInput("\r"); // opens on the running phase
+		assert.match(view.render(80).join("\n"), /q running/);
+		assert.doesNotMatch(view.render(80).join("\n"), /tok|cached|\$/);
+		view.handleInput("\x1b");
+		view.handleInput("k");
+		view.handleInput("\r");
+		assert.match(view.render(80).join("\n"), /1\.5k tok · 2\.0k cached · <\$0\.0001/);
+		assert.ok(view.render(40).every((line) => visibleWidth(line) <= 40));
+	} finally {
+		view.dispose();
+	}
 });
 
 test("inspector agents: a fan-out phase lists its items, a plain phase drills straight to detail", () => {
@@ -436,6 +493,19 @@ test("inspector agents: a fan-out phase lists its items, a plain phase drills st
 		view.handleInput("\r");
 		assert.deepEqual(opened, ["fan-1", "solo"], "a non-fan-out phase pushes detail with the phase id");
 		assert.match(view.render(60).join("\n"), /read a\.ts/, "detail, not an item list");
+	} finally {
+		view.dispose();
+	}
+});
+test("inspector: flow phase drills into its own node, not phantom child agents", () => {
+	const run = mkRun({ flow: { id: "flow", status: "running", subProgress: { done: 1, total: 2, running: 1, failed: 0 } } as PhaseState }, ["flow"]);
+	run.def.phases[0].type = "flow";
+	const opened: string[] = [];
+	const view = new InspectorComponent(run, theme, () => {}, true, undefined, undefined, (id) => { opened.push(id); return undefined; });
+	try {
+		view.handleInput("\r");
+		assert.deepEqual(opened, ["flow"]);
+		assert.match(view.render(60).join("\n"), /recorded activity/);
 	} finally {
 		view.dispose();
 	}

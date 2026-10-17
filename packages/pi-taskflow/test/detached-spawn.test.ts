@@ -13,7 +13,7 @@
  * runner), without needing live model access.
  */
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -46,6 +46,14 @@ test("detached-runner: resolves to a real file on disk (no `.js.js` double suffi
 		filePath.endsWith("detached-runner.ts") || filePath.endsWith("detached-runner.js"),
 		`resolved path should be detached-runner.{ts,js}, got: ${filePath}`,
 	);
+});
+
+test("detached launch binds current session before persisting, including resumed runs", () => {
+	const source = readFileSync(fileURLToPath(new URL("../src/index.ts", import.meta.url)), "utf8");
+	const launch = source.slice(source.indexOf("async function launchDetached("), source.indexOf("async function runFlow("));
+	assert.match(launch, /state\.ownerSessionId = ctx\.sessionManager\.getSessionId\(\)/);
+	assert.ok(launch.indexOf("state.ownerSessionId =") < launch.indexOf("saveRun(state"));
+	assert.match(source, /return launchDetached\(child, ctx, action, params\)/);
 });
 
 test("detached-runner: the resolved module loads (spawn → exits, does not ENOENT)", async () => {

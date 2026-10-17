@@ -300,6 +300,92 @@ export const piSubagentRunner = {
 });
 
 // ---------------------------------------------------------------------------
+// Detached runner: live progress is host opt-in
+// ---------------------------------------------------------------------------
+
+/** Runs a two-item map in the real detached runner; returns the on-disk record
+ *  2.5s after item 1 finished while item 0 is still in flight. */
+async function inFlightDetachedRecord(liveProgress: boolean): Promise<RunState | null> {
+	const cwd = makeTmpCwd();
+	const ctxDir = fs.mkdtempSync(path.join(os.tmpdir(), "taskflow-detach-"));
+	const mark = path.join(cwd, "slow-live");
+	const release = path.join(cwd, "release");
+	const def: Taskflow = { name: "detach-live", phases: [{ id: "recon", type: "map", over: '["slow","fast"]', agent: "a", task: "{item}", final: true }] };
+	const state = mkRunState(cwd, { flowName: def.name, def, detached: true });
+	saveRun(state);
+	const runnerPath = path.join(cwd, "fake-runner.mts");
+	fs.writeFileSync(runnerPath, `
+import { existsSync, writeFileSync } from "node:fs";
+const usage = { input: 0, output: 1, cacheRead: 100, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 };
+let fastDone = false;
+const wait = async (ok) => { while (!ok()) await new Promise((r) => setTimeout(r, 25)); };
+export const piSubagentRunner = {
+	usageAccounting: "available",
+	async runTask(_cwd, _agents, agent, task, opts) {
+		if (task === "slow") {
+			await wait(() => fastDone);
+			opts.onLive?.({ text: "scanning", usage });
+			setTimeout(() => writeFileSync(${JSON.stringify(mark)}, ""), 50);
+			await wait(() => existsSync(${JSON.stringify(release)}));
+		} else fastDone = true;
+		return { agent, task, exitCode: 0, output: task, stderr: "", usage, stopReason: "end" };
+	},
+};
+`);
+	fs.writeFileSync(path.join(ctxDir, "context.json"), JSON.stringify({
+		runId: state.runId,
+		defName: def.name,
+		args: {},
+		cwd,
+		runnerModule: pathToFileURL(runnerPath).href,
+		agents: [{ name: "a", description: "test agent", systemPrompt: "", source: "user", filePath: "" }],
+		...(liveProgress ? { liveProgress } : {}),
+	}));
+	const { spawn } = await import("node:child_process");
+	const child = spawn(
+		process.execPath,
+		["--experimental-strip-types", "--no-warnings", path.resolve("packages/taskflow-core/src/detached-runner.ts"), path.join(ctxDir, "context.json")],
+		{ stdio: ["ignore", "ignore", "pipe"], env: { ...process.env, PI_TASKFLOW_BUILTIN_AGENTS_DIR: "" } },
+	);
+	let stderr = "";
+	child.stderr.on("data", (c) => { stderr += String(c); });
+	const exited = new Promise<number | null>((r) => child.on("exit", r));
+	try {
+		const deadline = Date.now() + 10_000;
+		while (!fs.existsSync(mark)) {
+			assert.ok(Date.now() < deadline, `slow item never went live: ${stderr}`);
+			await new Promise((r) => setTimeout(r, 25));
+		}
+		await new Promise((r) => setTimeout(r, 2_500));
+		return loadRun(cwd, state.runId);
+	} finally {
+		fs.writeFileSync(release, "");
+		let timer: NodeJS.Timeout | undefined;
+		const code = await Promise.race([exited, new Promise<"timeout">((r) => { timer = setTimeout(() => r("timeout"), 10_000); })]);
+		clearTimeout(timer);
+		if (code === "timeout") child.kill("SIGKILL");
+		const final = loadRun(cwd, state.runId);
+		fs.rmSync(ctxDir, { recursive: true, force: true });
+		cleanup(cwd);
+		assert.equal(code, 0, `detached runner failed: ${stderr}`);
+		assert.equal(final?.status, "completed", "terminal save stays authoritative");
+		assert.deepEqual(final?.phases.recon.items?.map((i) => i.status), ["done", "done"]);
+	}
+}
+
+test("detached-runner: liveProgress opt-in persists in-flight item state; absent stays checkpoint-only", async () => {
+	const live = (await inFlightDetachedRecord(true))?.phases.recon?.items;
+	assert.deepEqual(live?.map((i) => i.status), ["running", "done"]);
+	assert.equal(live?.[0].liveText, "scanning");
+	assert.equal(live?.[0].usage?.cacheRead, 100);
+
+	const quiet = await inFlightDetachedRecord(false);
+	assert.equal(quiet?.status, "running");
+	assert.notEqual(quiet?.phases.recon?.items?.[1]?.status, "done", "no live write without opt-in");
+	assert.equal(quiet?.phases.recon?.items?.[0]?.liveText, undefined);
+});
+
+// ---------------------------------------------------------------------------
 // Detached runner: process crash persists failure
 // ---------------------------------------------------------------------------
 

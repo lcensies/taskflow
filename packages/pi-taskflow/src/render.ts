@@ -7,9 +7,8 @@
 
 import { getMarkdownTheme, type Theme } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, Spacer, Text, truncateToWidth, type Component } from "@earendil-works/pi-tui";
-import { type UsageStats } from "taskflow-core";
+import { aggregateUsage, dependenciesOf, emptyUsage, formatTokens, type Phase, topoLayers, type UsageStats } from "taskflow-core";
 import type { PhaseState, RunState } from "taskflow-core";
-import { dependenciesOf, type Phase, topoLayers } from "taskflow-core";
 
 // Single-width glyphs (Geometric Shapes / check marks) — keep columns aligned.
 const ICON: Record<PhaseState["status"], { ch: string; color: string }> = {
@@ -104,12 +103,18 @@ export function backEdgeAnnotation(phase: Phase, ps: PhaseState | undefined, the
 	return "";
 }
 
+export function formatCost(cost: number): string {
+	return cost > 0 && cost < 1e-4 ? "<$0.0001" : `$${cost.toFixed(cost >= 0.01 ? 2 : 4)}`;
+}
+
+export function formatUsage(usage: UsageStats | undefined): string {
+	if (!usage) return "";
+	const fresh = usage.input + usage.output + usage.cacheWrite;
+	return fresh || usage.cacheRead ? `${formatTokens(fresh)} tok${usage.cacheRead ? ` · ${formatTokens(usage.cacheRead)} cached` : ""}` : "";
+}
+
 function costStr(usage: UsageStats | undefined, theme: Theme): string {
-	if (!usage?.cost) return "";
-	const c = usage.cost;
-	return c >= 0.01
-		? theme.fg("muted", `$${c.toFixed(2)}`)
-		: theme.fg("muted", `$${c.toFixed(4)}`);
+	return usage?.cost ? theme.fg("muted", formatCost(usage.cost)) : "";
 }
 
 function aggregateCost(state: RunState): number {
@@ -335,8 +340,10 @@ function footerLine(state: RunState, theme: Theme, liveText?: string): string {
 	let line = `  ${spin}`;
 	const cost = aggregateCost(state);
 	const budget = state.def.budget;
-	if (budget?.maxUSD !== undefined) line += theme.fg("muted", ` · $${cost >= 0.01 ? cost.toFixed(2) : cost.toFixed(4)}/$${budget.maxUSD}`);
-	else if (cost) line += theme.fg("muted", ` · $${cost >= 0.01 ? cost.toFixed(2) : cost.toFixed(4)}`);
+	if (budget?.maxUSD !== undefined) line += theme.fg("muted", ` · ${formatCost(cost)}/$${budget.maxUSD}`);
+	else if (cost) line += theme.fg("muted", ` · ${formatCost(cost)}`);
+	const usage = formatUsage(aggregateUsage(Object.values(state.phases).map((ps) => ps.usage ?? emptyUsage())));
+	if (usage) line += theme.fg("dim", ` · ${usage}`);
 	const el = runElapsed(state);
 	if (el) line += theme.fg("dim", ` · ${elapsed(el)}`);
 	if (liveText) line += theme.fg("muted", ` · › ${liveText.replace(/\s+/g, " ").trim()}`);

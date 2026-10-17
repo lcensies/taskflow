@@ -35,6 +35,8 @@ async function assertRunningPhasePersisted(eventKernel: boolean): Promise<void> 
 	const taskGate = new Promise<void>((resolve) => {
 		releaseTask = resolve;
 	});
+	let markStarted: () => void = () => {};
+	const started = new Promise<void>((resolve) => { markStarted = resolve; });
 
 	const snapshots: RunState[] = [];
 	const deps: RuntimeDeps = {
@@ -48,6 +50,7 @@ async function assertRunningPhasePersisted(eventKernel: boolean): Promise<void> 
 			filePath: "test",
 		}],
 		runTask: async () => {
+			markStarted();
 			await taskGate;
 			return {
 				agent: "executor",
@@ -64,14 +67,17 @@ async function assertRunningPhasePersisted(eventKernel: boolean): Promise<void> 
 
 	const runPromise = executeTaskflow(state, deps);
 
-	// Let the phase-start checkpoint flush before releasing the mock task.
-	await new Promise((resolve) => setImmediate(resolve));
-	assert.ok(
-		snapshots.some((s) => s.phases.work?.status === "running" && typeof s.phases.work?.startedAt === "number"),
-		`expected a persisted snapshot with phases.work.status === "running" (eventKernel=${eventKernel}); got: ${JSON.stringify(snapshots.map((s) => s.phases.work?.status))}`,
-	);
-
-	releaseTask();
+	// Dynamic imports can outlast one event-loop turn; wait for actual dispatch.
+	try {
+		await Promise.race([started, runPromise]);
+		assert.ok(
+			snapshots.some((s) => s.phases.work?.status === "running" && typeof s.phases.work?.startedAt === "number"),
+			`expected a persisted snapshot with phases.work.status === "running" (eventKernel=${eventKernel}); got: ${JSON.stringify(snapshots.map((s) => s.phases.work?.status))}`,
+		);
+	} finally {
+		releaseTask();
+		await runPromise;
+	}
 	const result = await runPromise;
 	assert.equal(result.finalOutput, "done");
 	assert.equal(result.state.phases.work?.status, "done");

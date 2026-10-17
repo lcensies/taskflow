@@ -824,6 +824,7 @@ export async function executeFlowBody(phase: Phase, ctx: StepContext): Promise<B
 		dynamic: hasDef,
 		flowSourceFile: subFlowSourceFile,
 		flowSourceDirIdentity: subFlowSourceDirIdentity,
+		phaseId: phase.id,
 	});
 
 	return {

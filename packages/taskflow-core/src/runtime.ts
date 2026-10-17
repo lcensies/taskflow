@@ -509,6 +509,7 @@ function mergePhaseState(
 	results: RunResult[],
 	inputHash: string,
 	parseJson: boolean,
+	items: NonNullable<PhaseState["items"]>,
 ): PhaseState {
 	const budgetSkips = results.filter((r) => r.stopReason === "budget-skipped");
 	const ran = results.filter((r) => r.stopReason !== "budget-skipped");
@@ -553,6 +554,7 @@ function mergePhaseState(
 		timedOut: ran.some((r) => r.phaseTimeout) || undefined,
 		budgetTruncated: budgetSkips.length > 0 || undefined,
 		subProgress: { done: ran.length, total: results.length, running: 0, failed: failedCount },
+		items: items.map((item) => ({ ...item })),
 		error: errors.length ? errors.join("; ") : undefined,
 		inputHash,
 		endedAt: Date.now(),
@@ -2139,6 +2141,8 @@ async function executePhaseInner(
 		const live = state.phases[phase.id];
 		const liveUsages: UsageStats[] = items.map(() => emptyUsage());
 		let latestText = "";
+		const itemsState: NonNullable<PhaseState["items"]> = items.map(({ agent }) => ({ agent, status: "pending" }));
+		if (live && (type === "map" || type === "parallel")) live.items = itemsState;
 		let latestModel: string | undefined;
 		const refresh = () => {
 			if (live) {
@@ -2158,6 +2162,7 @@ async function executePhaseInner(
 			// Budget guard: stop spawning new fan-out items once the run is over budget.
 			if (overBudget(state).over) {
 				done++;
+				itemsState[idx].status = "skipped";
 				refresh();
 				return {
 					agent: it.agent,
@@ -2180,6 +2185,7 @@ async function executePhaseInner(
 						const hit = cachedPhase(perItem.cc, ckItem);
 						if (hit) {
 							done++;
+							itemsState[idx].status = "done";
 							const synth = phaseStateToRunResult(hit, it);
 							liveUsages[idx] = emptyUsage();
 							if (hit.model) latestModel = hit.model;
@@ -2192,12 +2198,15 @@ async function executePhaseInner(
 				}
 			}
 			running++;
+			itemsState[idx].status = "running";
 			refresh();
 			if (ctxDir) {
 				try { registerNode(ctxDir, nodeIdFor(String(idx)), phase.id, undefined, "running"); } catch { /* fail-open */ }
 			}
 			const r = await runOne(it.agent, it.task, (l) => {
 				liveUsages[idx] = l.usage;
+				itemsState[idx].usage = l.usage;
+				if (l.text) itemsState[idx].liveText = l.text.replace(/\s+/g, " ").trim().slice(0, 200);
 				if (l.text) latestText = l.text;
 				if (l.model) latestModel = l.model;
 				refresh();
@@ -2206,6 +2215,8 @@ async function executePhaseInner(
 			done++;
 			if (isFailed(r)) failed++;
 			liveUsages[idx] = r.usage;
+			itemsState[idx].status = isFailed(r) ? "failed" : "done";
+			itemsState[idx].usage = r.usage;
 			// Publish the just-finished sibling's spend before considering any
 			// ctx_spawn intents. Budgeted fan-out allows one atomic call to cross the
 			// ceiling, but must not admit descendants after that overshoot.
@@ -2259,6 +2270,8 @@ async function executePhaseInner(
 					}
 				} catch { /* fail-open */ }
 			}
+			itemsState[idx].status = isFailed(r) ? "failed" : "done";
+			itemsState[idx].usage = r.usage;
 			refresh();
 			return r;
 		});
@@ -2852,7 +2865,8 @@ async function executePhaseInner(
 		const cached = cachedPhase(cc, ck);
 		if (cached) return cached;
 
-		const ps = await executeParallelBranches(phase, branches, runFanout, mergePhaseState, {
+		const ps = await executeParallelBranches(phase, branches, runFanout,
+			(id, results, hash, json) => mergePhaseState(id, results, hash, json, state.phases[id]?.items ?? []), {
 			inputHash,
 			parseJson,
 			reads: readRefs.length ? readRefsToReads(readRefs, state) : undefined,
@@ -2970,7 +2984,7 @@ async function executePhaseInner(
 		if (cached) return cached;
 
 		const results = await runFanout(tasks, perItem);
-		const ps = mergePhaseState(phase.id, results, inputHash, parseJson);
+		const ps = mergePhaseState(phase.id, results, inputHash, parseJson, state.phases[phase.id]?.items ?? []);
 		if (readRefs.length) ps.reads = readRefsToReads(readRefs, state);
 		if (mapTruncated) {
 			ps.warnings = [...(ps.warnings ?? []), `map fan-out truncated to MAX_DYNAMIC_MAP_ITEMS (${MAX_DYNAMIC_MAP_ITEMS}) inside a dynamic sub-flow`];
@@ -4059,7 +4073,9 @@ function cachedPhase(cc: PhaseCacheCtx, keys: CacheKeys): PhaseState | null {
 			// the cache hit + zero usage. Fallback to the legacy trimmed surface
 			// for entries written before this change.
 			if (e.state) {
-				return { ...e.state, inputHash: keys.key, usage: emptyUsage(), cacheHit: "cross-run", endedAt: Date.now() };
+				// Item usage/liveText measured the earlier run, not this one; copy so the entry stays intact.
+				const items = e.state.items?.map(({ agent, status }) => ({ agent, status }));
+				return { ...e.state, inputHash: keys.key, usage: emptyUsage(), ...(items ? { items } : {}), cacheHit: "cross-run", endedAt: Date.now() };
 			}
 			return {
 				id: cc.phaseId,

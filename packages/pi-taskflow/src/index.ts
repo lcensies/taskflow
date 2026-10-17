@@ -32,7 +32,7 @@ import { type AgentConfig, type AgentScope, discoverAgents, type Phase, plannedM
 import { renderFingerprint, renderRunResult, summarizeRun } from "./render.ts";
 import { createPiSubagentRunner, PI_TASKFLOW_PI_ENTRY_ENV, resolveParentPiCliEntry, runnerModulePath } from "./runner.ts";
 import { RunHistoryComponent, type RunHistoryResult } from "./runs-view.ts";
-import { ApprovalViewComponent, createApprovalRequester, type ApprovalChoice } from "./approval-view.ts";
+import { createApprovalRequester } from "./approval-view.ts";
 import { createWebCommand } from "./web-command.ts";
 import { InspectorComponent, type InspectorResult } from "./inspector-view.ts";
 import { clearActiveRun, getActiveRun, setActiveRun } from "./active-run.ts";
@@ -489,13 +489,14 @@ export function resolveCacheScope(
 // only needs a persisted RunState (done phases are reused on execute).
 async function launchDetached(
 	state: RunState,
-	ctx: { cwd: string },
+	ctx: ExtensionContext,
 	action: string,
 	params: { incremental?: boolean; reusedFromSearch?: boolean; name?: string },
 ): Promise<ToolResult> {
 	const def = state.def;
 	const args = state.args;
 	state.detached = true;
+	state.ownerSessionId = ctx.sessionManager.getSessionId();
 	state.detachedStartedAt = Date.now();
 	state.detachedControlVersion = DETACHED_CONTROL_VERSION;
 	state.detachedInstanceId = (await import("node:crypto")).randomUUID();
@@ -555,6 +556,7 @@ async function launchDetached(
 				maxKeptRuns: detachedSettings.taskflow.maxKeptRuns,
 				maxRunAgeDays: detachedSettings.taskflow.maxRunAgeDays,
 				detachedInstanceId: state.detachedInstanceId,
+				liveProgress: true,
 			}),
 			{ encoding: "utf-8", flag: "wx", mode: 0o600 },
 		);
@@ -693,8 +695,6 @@ async function runFlow(
 	// swallowed and neither can fail a run.
 	const status = statusPublisher(ctx, state.flowName);
 	status.update(state);
-	const statusTicker = setInterval(() => status.update(state), 1000);
-	(statusTicker as { unref?: () => void }).unref?.();
 
 	// Every emit re-renders the whole tool card (progress block + activity +
 	// result). The heartbeat below ticks at 8fps regardless of activity, so
@@ -718,10 +718,13 @@ async function runFlow(
 
 	// Runtime persist is checkpoint-only; streaming/UI updates use onProgress.
 	// Every checkpoint must survive a process kill before the next UI frame.
+	// Live fan-out progress additionally writes at most once per second so other
+	// sessions can inspect a run in flight.
 	const cleanupConfig = { maxKeep: DEFAULT_KEPT_RUNS, maxAgeDays: DEFAULT_RUN_AGE_DAYS };
 	const waitingApprovals = new Set<string>();
 	const lifecycleKey = (s: RunState) => JSON.stringify([s.status, Object.values(s.phases).map((phase) => [phase.id, phase.status]).sort()]);
 	let lastLifecycleKey = "";
+	let lastPersist = 0;
 	const persistCheckpoint = (s: RunState) => {
 		const running = Object.values(s.phases).filter((phase) => phase.status === "running").map((phase) => phase.id);
 		if (s.foregroundOwner) {
@@ -730,9 +733,27 @@ async function runFlow(
 				s.foregroundOwner.approvalWait = running.sort();
 			}
 		}
+		lastPersist = Date.now();
 		saveRun(s, cleanupConfig);
 		lastLifecycleKey = lifecycleKey(s);
 	};
+	// Timer-driven write: no core guard here, so swallow failures — the next
+	// checkpoint or the terminal save in `finally` stays authoritative.
+	const persistThrottled = (s: RunState) => {
+		if (Date.now() - lastPersist < 1000) return;
+		lastPersist = Date.now();
+		try {
+			saveRun(s, cleanupConfig);
+		} catch {
+			/* retried by the next checkpoint, tick, or terminal save */
+		}
+	};
+
+	const statusTicker = setInterval(() => {
+		status.update(state);
+		if (state.status === "running") persistThrottled(state);
+	}, 1000);
+	(statusTicker as { unref?: () => void }).unref?.();
 
 	// ~8fps heartbeat drives all rendering: it naturally caps the frame rate
 	// (no event bursts) while keeping the spinner, elapsed timers, live tokens
@@ -817,8 +838,9 @@ async function runFlow(
 			persist: persistCheckpoint,
 			// Phase starts arrive via onProgress before child execution. Persist
 			// their status changes to invalidate an earlier approval-only marker;
-			// streaming text/token updates retain the same key and never write.
-			onProgress: (s) => { if (lifecycleKey(s) !== lastLifecycleKey) persistCheckpoint(s); },
+			// streaming text/token/item updates keep the same key, so they only get
+			// the throttled live write.
+			onProgress: (s) => { if (lifecycleKey(s) !== lastLifecycleKey) persistCheckpoint(s); else persistThrottled(s); },
 			// Deterministic-replay trace (best-effort, fail-open). Records each
 			// subagent call + runtime decisions to an append-only JSONL so a future
 			// `replay` can re-evaluate the run offline. Absent in tests = no-op.
@@ -922,10 +944,22 @@ function plannedModelResolver(cwd: string): (phase: Phase) => string | undefined
 	return fn;
 }
 
+/** Stored runs with this process's in-flight run in place of its record (which
+ *  lags up to a second), or first when no record has reached disk yet. */
+function listRunsWithActive(cwd: string): RunState[] {
+	const stored = listRuns(cwd, 50);
+	const active = getActiveRun();
+	if (active?.cwd !== cwd) return stored;
+	const { state } = active;
+	return stored.some((run) => run.runId === state.runId)
+		? stored.map((run) => (run.runId === state.runId ? state : run))
+		: [state, ...stored];
+}
+
 /** Stored-run history panel — the `/tf runs` view, and the inspector's fallback
  *  when no run is in flight. */
 async function openRunHistory(pi: ExtensionAPI, ctx: ViewCtx): Promise<void> {
-	const runs = listRuns(ctx.cwd, 50);
+	const runs = listRunsWithActive(ctx.cwd);
 	if (runs.length === 0) {
 		ctx.ui.notify("No taskflow runs yet.", "info");
 		return;
@@ -943,7 +977,7 @@ async function openRunHistory(pi: ExtensionAPI, ctx: ViewCtx): Promise<void> {
 			theme,
 			(r) => done(r),
 			{
-				refresh: () => listRuns(ctx.cwd, 50),
+				refresh: () => listRunsWithActive(ctx.cwd),
 				requestRender: () => tui.requestRender(),
 				intervalMs: 1000,
 			},

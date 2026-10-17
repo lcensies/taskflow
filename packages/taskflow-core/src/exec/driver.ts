@@ -215,6 +215,7 @@ export async function runEventKernel(state: RunState, deps: EventKernelDeps): Pr
 		dynamic?: boolean;
 		flowSourceFile?: string;
 		flowSourceDirIdentity?: DirectoryIdentity;
+		phaseId?: string;
 	}): Promise<NestedFlowResult> => {
 		const nestedArgs = resolveArgs(opts.def, opts.args);
 		const dynamic = deps._dynamic === true || opts.dynamic === true;
@@ -313,6 +314,23 @@ export async function runEventKernel(state: RunState, deps: EventKernelDeps): Pr
 			// by the imperative path rather than polluting the parent's event log.
 			trace: undefined,
 			_stack: opts.stack,
+			// As on the imperative path: the child record is never persisted on its
+			// own; its progress is summarised on the parent's flow phase and reported
+			// against the parent run, so host throttles only ever see the parent.
+			persist: undefined,
+			onProgress: () => {
+				const live = opts.phaseId ? state.phases[opts.phaseId] : undefined;
+				if (live?.status === "running") {
+					const ph = Object.values(childState.phases);
+					live.subProgress = {
+						done: ph.filter((p) => p.status === "done" || p.status === "failed").length,
+						total: effectiveDef.phases.length,
+						running: ph.filter((p) => p.status === "running").length,
+						failed: ph.filter((p) => p.status === "failed").length,
+					};
+				}
+				deps.onProgress?.(state);
+			},
 		});
 		const childErr = Object.values(child.state.phases)
 			.map((p) => p.error)
@@ -336,6 +354,7 @@ export async function runEventKernel(state: RunState, deps: EventKernelDeps): Pr
 		loadFlow: deps.loadFlow,
 		loadSavedFlow: deps.loadSavedFlow,
 		stack: deps._stack ?? [],
+		onProgress: deps.onProgress,
 		runNested,
 	};
 
@@ -486,6 +505,7 @@ export async function runEventKernel(state: RunState, deps: EventKernelDeps): Pr
 				gate: result.gate,
 				approval: result.approval,
 				warnings: result.warnings,
+				items: result.items,
 				...(verdict ? { verdict } : {}),
 				...(observedReads.length ? { reads: observedReads } : {}),
 				...(result.promptStats ? { promptStats: result.promptStats } : {}),

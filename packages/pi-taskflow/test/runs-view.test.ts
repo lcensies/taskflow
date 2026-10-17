@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { RunHistoryComponent } from "../src/runs-view.ts";
-import type { RunState } from "taskflow-core";
+import { clearActiveRun, setActiveRun } from "../src/active-run.ts";
+import { saveRun, type RunState } from "taskflow-core";
 
 /** Identity theme — strips styling so assertions see plain structure. */
 const theme: any = { fg: (_c: string, s: string) => s, bold: (s: string) => s };
@@ -42,19 +46,50 @@ test("runs-view: live refresh re-reads and requestRender fires when state change
 	}
 });
 
-test("runs-view: no requestRender when refreshed state is unchanged", async () => {
+test("runs-view: running run repaints each tick even with unchanged stored state", async () => {
 	const initial = [mkRun({ status: "running", updatedAt: 1000 })];
 	let renders = 0;
 	const view = new RunHistoryComponent(initial, theme, () => {}, {
-		refresh: () => [mkRun({ status: "running", updatedAt: 1000 })], // identical
-		requestRender: () => {
-			renders++;
-		},
+		refresh: () => [mkRun({ status: "running", updatedAt: 1000 })],
+		requestRender: () => { renders++; },
 		intervalMs: 250,
 	});
 	try {
-		await new Promise((r) => setTimeout(r, 320));
-		assert.equal(renders, 0, "identical snapshot must not trigger a render");
+		await new Promise((resolve) => setTimeout(resolve, 320));
+		assert.ok(renders >= 1);
+	} finally {
+		view.dispose();
+	}
+});
+test("runs-view: unchanged finished run does not repaint", async () => {
+	const run = mkRun({ status: "completed" });
+	let renders = 0;
+	const view = new RunHistoryComponent([run], theme, () => {}, {
+		refresh: () => [mkRun({ status: "completed" })],
+		requestRender: () => { renders++; },
+		intervalMs: 250,
+	});
+	try {
+		await new Promise((resolve) => setTimeout(resolve, 320));
+		assert.equal(renders, 0);
+	} finally {
+		view.dispose();
+	}
+});
+
+test("runs-view: per-item status refreshes an open inspector without updatedAt change", async () => {
+	const def = { name: "demo", phases: [{ id: "recon", type: "map" as const, over: "[]", task: "t" }] };
+	const subProgress = { done: 0, total: 2, running: 2, failed: 0 };
+	const first = mkRun({ def, phases: { recon: { id: "recon", status: "running", subProgress, items: [{ agent: "a", status: "running" }, { agent: "a", status: "running" }] } } });
+	let snapshot = first;
+	const view = new RunHistoryComponent([first], theme, () => {}, { refresh: () => [snapshot], requestRender: () => {}, intervalMs: 250 });
+	try {
+		view.handleInput("\r");
+		view.handleInput("\r");
+		assert.match(view.render(80).join("\n"), /◐ \[2\]/);
+		snapshot = mkRun({ def, phases: { recon: { id: "recon", status: "running", subProgress, items: [{ agent: "a", status: "running" }, { agent: "a", status: "done" }] } } });
+		await new Promise((resolve) => setTimeout(resolve, 320));
+		assert.match(view.render(80).join("\n"), /✓ \[2\]/);
 	} finally {
 		view.dispose();
 	}
@@ -228,4 +263,71 @@ test("runs-view: D clears finished runs and closes when nothing remains", () => 
 	view.handleInput("y");
 	assert.equal(closed, 1, "panel closes once the list is empty");
 	view.dispose();
+});
+
+test("/tf runs: same-process active run overrides its stale record and appears before reaching disk", async () => {
+	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "tf-runs-active-"));
+	let tool: any;
+	(await import("../src/index.ts")).default({
+		registerTool: () => {},
+		registerCommand: (name: string, c: any) => { if (name === "tf") tool = c; },
+		registerShortcut: () => {},
+		on: () => {},
+		sendUserMessage: () => {},
+	} as any);
+	const def = { name: "demo", phases: [{ id: "recon", type: "map" as const, over: "[]", task: "t" }] };
+	const recon = (statuses: Array<"running" | "done">) => ({
+		id: "recon", status: "running" as const,
+		subProgress: { done: statuses.filter((s) => s === "done").length, total: 2, running: statuses.filter((s) => s === "running").length, failed: 0 },
+		items: statuses.map((status) => ({ agent: "a", status })),
+	});
+	/** Open `/tf runs` and hand back the panel plus a closer. */
+	async function open() {
+		let view: any;
+		let close!: () => void;
+		const shown = new Promise<void>((ready, fail) => {
+			const ui = {
+				notify: (msg: string) => fail(new Error(`unexpected notify: ${msg}`)),
+				custom: (factory: any) => new Promise((resolve) => {
+					view = factory({ requestRender: () => {}, terminal: { rows: 40 } }, theme, undefined, resolve);
+					close = () => { view.dispose(); resolve(undefined); };
+					ready();
+				}),
+			};
+			void tool.handler("runs", { cwd, hasUI: true, ui, isIdle: () => true });
+		});
+		await shown;
+		return { view, close };
+	}
+	let active: RunState | undefined;
+	try {
+		// Not on disk yet: the active run is still listed.
+		const fresh = active = mkRun({ runId: "demo-fresh-1", cwd, def, phases: { recon: recon(["running", "running"]) } });
+		setActiveRun(fresh, cwd);
+		const first = await open();
+		assert.match(first.view.render(80).join("\n"), /demo/);
+		first.close();
+		clearActiveRun(fresh);
+
+		// Stored record lags (both running); in memory item 1 is already done.
+		const stale = mkRun({ runId: "demo-live-1", cwd, def, updatedAt: Date.now(), phases: { recon: recon(["running", "running"]) } });
+		saveRun(stale, { maxKeep: 0, maxAgeDays: 0 });
+		const live = active = { ...stale, phases: { recon: recon(["running", "done"]) } } as RunState;
+		setActiveRun(live, cwd);
+		const { view, close } = await open();
+		try {
+			view.handleInput("\r");
+			view.handleInput("\r");
+			assert.match(view.render(80).join("\n"), /✓ \[2\]/, "in-memory state wins over the stale record");
+			// Quiet phase: disk untouched, only the live item status changes.
+			live.phases.recon = recon(["done", "done"]);
+			await new Promise((r) => setTimeout(r, 1_100));
+			assert.match(view.render(80).join("\n"), /✓ \[1\]/, "poll repaints from the live state");
+		} finally {
+			close();
+		}
+	} finally {
+		if (active) clearActiveRun(active);
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
 });

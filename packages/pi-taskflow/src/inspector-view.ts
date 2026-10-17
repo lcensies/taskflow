@@ -15,7 +15,7 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { isKeyRelease, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { type Phase, type PhaseState, type ReattachState, type RunState, splitItems } from "taskflow-core";
-import { backEdgeAnnotation } from "./render.ts";
+import { backEdgeAnnotation, formatCost, formatUsage } from "./render.ts";
 import { ScrollPane } from "./scroll-pane.ts";
 import { renderTranscript, TranscriptTail } from "./transcript-view.ts";
 
@@ -95,40 +95,23 @@ export function windowStart(count: number, cursor: number, visible: number): num
 export interface AgentRow {
 	/** 0-based position within the fan-out. */
 	index: number;
-	/** Agent name from the merged output's `### [k/N] <agent>` label, else `item k`. */
+	/** Agent name from indexed state, or historical output where available. */
 	label: string;
-	status: "done" | "failed" | "running" | "pending";
+	status: "done" | "failed" | "skipped" | "running" | "pending" | "unknown";
+	usage?: PhaseState["usage"];
 }
 
-/**
- * Fan-out item rows of a phase, derived (never stored) from `subProgress` plus
- * the merged output's labelled sections. `[]` for a phase that ran a single
- * subagent — those drill straight to detail.
- */
-export function agentRows(ps: PhaseState | undefined): AgentRow[] {
+/** Indexed fan-out items; old run files without item states report unknown. */
+export function agentRows(ps: PhaseState | undefined, type: Phase["type"] = "map"): AgentRow[] {
+	if (type !== "map" && type !== "parallel") return [];
 	const sub = ps?.subProgress;
 	if (!sub) return [];
 	const sections = ps?.output ? splitItems(ps.output) : new Map<number, string>();
-	const rows: AgentRow[] = [];
-	for (let index = 0; index < sub.total; index++) {
-		const section = sections.get(index + 1);
-		const head = section?.split("\n", 1)[0]?.match(/^### \[\d+\/\d+\]\s*(.*)$/)?.[1]?.trim() ?? "";
-		const failed = head.endsWith("(failed)");
-		const agent = (failed ? head.slice(0, -"(failed)".length) : head).trim();
-		// No section: the item is either budget-skipped or still in flight, so fall
-		// back to counting positions off subProgress.
-		const status: AgentRow["status"] = section
-			? failed
-				? "failed"
-				: "done"
-			: index < sub.done
-				? "done"
-				: index < sub.done + sub.running
-					? "running"
-					: "pending";
-		rows.push({ index, label: agent || `item ${index + 1}`, status });
-	}
-	return rows;
+	return Array.from({ length: sub.total }, (_, index) => {
+		const item = ps?.items?.[index];
+		const head = sections.get(index + 1)?.split("\n", 1)[0]?.match(/^### \[\d+\/\d+\]\s*(.*)$/)?.[1]?.trim() ?? "";
+		return { index, label: (item?.agent ?? head.replace(/ \(failed\)$/, "")) || `item ${index + 1}`, status: item?.status ?? "unknown", usage: item?.usage };
+	});
 }
 
 function statusBadge(status: string, theme: Theme, reattach?: ReattachState): string {
@@ -142,6 +125,7 @@ function statusBadge(status: string, theme: Theme, reattach?: ReattachState): st
 	if (status === "failed") return theme.fg("error", "✗");
 	if (status === "running") return theme.fg("warning", "◐");
 	if (status === "skipped") return theme.fg("muted", "⊘");
+	if (status === "unknown") return theme.fg("dim", "?");
 	return theme.fg("dim", "○");
 }
 
@@ -179,7 +163,8 @@ function shortModel(model: string): string {
 }
 
 function agentLine(row: AgentRow, theme: Theme): string {
-	return `${statusBadge(row.status, theme)} ${theme.fg("dim", `[${row.index + 1}]`)} ${row.label}`;
+	const usage = formatUsage(row.usage);
+	return `${statusBadge(row.status, theme)} ${theme.fg("dim", `[${row.index + 1}]`)} ${row.label}${usage ? theme.fg("dim", `  ${usage}`) : ""}`;
 }
 
 /** One rung of the navigator: run phases → a phase's fan-out items → one node's detail. */
@@ -282,7 +267,8 @@ export class InspectorComponent {
 	/** Fan-out items of the selected phase; `[]` when it ran a single subagent. */
 	private currentAgentRows(): AgentRow[] {
 		const id = this.currentPhaseId();
-		return agentRows(id ? this.state.phases[id] : undefined);
+		const phase = this.state.def.phases?.find((p) => p.id === id);
+		return agentRows(id ? this.state.phases[id] : undefined, phase?.type);
 	}
 
 	/** Node the detail level shows: the phase, or `<phaseId>-<idx>` under `agents`. */
@@ -383,12 +369,18 @@ export class InspectorComponent {
 		const ps = id ? this.state.phases[id] : undefined;
 		const lines: string[] = [];
 		lines.push(`${th.fg("accent", id ?? "?")} ${th.fg("dim", ps?.status ?? "pending")}`);
+		const agentsAt = this.levelStack.indexOf("agents");
+		const item = agentsAt < 0 ? undefined : this.currentAgentRows()[this.cursors[agentsAt] ?? 0];
+		if (item) lines.push(`${th.fg("accent", `[${item.index + 1}] ${item.label}`)} ${th.fg("dim", item.status)}`);
 		const meta: string[] = [];
 		const phase = (this.state.def.phases ?? []).find((p) => p.id === id);
 		const planned = phase ? this.plannedModel?.(phase) : undefined;
 		if (ps?.model) meta.push(ps.model);
 		else if (planned) meta.push(`~${planned}`);
-		if (ps?.usage) meta.push(`${ps.usage.input + ps.usage.output} tok`);
+		const usage = agentsAt < 0 ? ps?.usage : item?.usage;
+		const tokens = formatUsage(usage);
+		if (tokens) meta.push(tokens);
+		if (usage?.cost) meta.push(formatCost(usage.cost));
 		if (ps?.attempts && ps.attempts > 1) meta.push(`${ps.attempts} attempts`);
 		if (ps?.steered) meta.push("steered");
 		if (meta.length) lines.push(th.fg("dim", meta.join(" · ")));

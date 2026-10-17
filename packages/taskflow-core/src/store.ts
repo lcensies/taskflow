@@ -112,6 +112,8 @@ export interface PhaseState {
 	endedAt?: number;
 	/** Live fan-out progress for map/parallel phases. */
 	subProgress?: { done: number; total: number; running: number; failed: number };
+	/** Indexed map/parallel items; absent on older runs and non-fan-out phases. */
+	items?: Array<{ status: "pending" | "running" | "done" | "failed" | "skipped"; agent: string; usage?: UsageStats; liveText?: string }>;
 	/** Latest activity line from the running subagent(s). */
 	liveText?: string;
 	/** Recent activity lines (oldest first), bounded by LIVE_LOG_MAX. The single
@@ -234,6 +236,8 @@ export interface RunState {
 	foregroundInterruption?: { kind: "approval-owner-exit"; ownerPid: number; ownerInstanceId: string; detectedAt: number };
 	/** True for runs spawned via `detach: true` (background execution). */
 	detached?: boolean;
+	/** Pi session that dispatched this run; absent on legacy and non-Pi runs. */
+	ownerSessionId?: string;
 	/** Wall-clock launch time for detached lifecycle/orphan diagnostics. */
 	detachedStartedAt?: number;
 	/** Version of the durable detached-control protocol understood by the

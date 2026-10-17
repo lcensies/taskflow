@@ -54,8 +54,14 @@ function hasChanged(prev: RunState[], next: RunState[]): boolean {
 	const byId = new Map(prev.map((r) => [r.runId, r]));
 	for (const n of next) {
 		const p = byId.get(n.runId);
-		if (!p) return true;
-		if (p.status !== n.status || p.updatedAt !== n.updatedAt) return true;
+		if (!p || p.status !== n.status || p.updatedAt !== n.updatedAt) return true;
+		for (const [id, ps] of Object.entries(n.phases)) {
+			const before = p.phases[id];
+			if (!before || before.status !== ps.status || before.liveText !== ps.liveText ||
+				JSON.stringify(before.subProgress) !== JSON.stringify(ps.subProgress) ||
+				JSON.stringify(before.items) !== JSON.stringify(ps.items)) return true;
+		}
+		if (Object.keys(p.phases).length !== Object.keys(n.phases).length) return true;
 	}
 	return false;
 }
@@ -132,7 +138,9 @@ export class RunHistoryComponent {
 			return; // transient read/lock error — try again next tick
 		}
 		if (!next.length) return;
-		if (!hasChanged(this.runs, next)) return;
+		// A running run repaints every tick: the in-process active run is the same
+		// mutable object on both sides, so a diff cannot see its progress.
+		if (!hasChanged(this.runs, next) && !next.some((run) => run.status === "running")) return;
 		// Preserve the user's selection by runId across refreshes.
 		const selectedId = this.runs[this.selected]?.runId;
 		this.runs = next;

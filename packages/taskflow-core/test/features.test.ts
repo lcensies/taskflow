@@ -258,6 +258,7 @@ test("budget: caps a runaway map fan-out and marks the run blocked", async () =>
 	assert.equal(res.state.phases.m.budgetTruncated, true);
 	assert.equal(res.state.phases.m.subProgress?.total, 5);
 	assert.ok((res.state.phases.m.subProgress?.done ?? 5) < 5, "fan-out should be cut short");
+	assert.deepEqual(res.state.phases.m.items?.map((item) => item.status), ["done", "done", "skipped", "skipped", "skipped"]);
 	assert.match(res.state.phases.m.error ?? "", /skipped: budget exceeded/);
 	assert.equal(res.state.status, "blocked");
 });

@@ -25,6 +25,7 @@ import {
 	transcriptDirFor,
 	DEFAULT_KEPT_RUNS,
 	DEFAULT_RUN_AGE_DAYS,
+	type RunState,
 } from "./store.ts";
 import {
 	clearDetachedCancelRequest,
@@ -73,6 +74,9 @@ interface DetachContext {
 	maxKeptRuns?: number;
 	maxRunAgeDays?: number;
 	detachedInstanceId?: string;
+	/** Host opt-in: also persist live progress, at most once per second plus a
+	 *  trailing write when progress goes quiet. Absent = checkpoint-only. */
+	liveProgress?: boolean;
 }
 
 const START_GATE_TIMEOUT_MS = 5_000;
@@ -185,6 +189,19 @@ try {
 	}
 
 	process.env.TASKFLOW_DETACHED_RUNNER = "1";
+	// Live progress: checkpoints always save; progress saves when >=1s since the
+	// last save, else it is left for the 1s tick below. Intermediate writes fail open.
+	let lastSave = 0;
+	let liveState: RunState | undefined;
+	const checkpoint = (s: RunState) => {
+		lastSave = Date.now();
+		saveRun(s, cleanupConfig);
+		liveState = undefined;
+	};
+	const liveSave = () => {
+		if (liveState?.status !== "running" || Date.now() - lastSave < 1_000) return;
+		try { checkpoint(liveState); } catch { /* next tick, checkpoint, or terminal save retries */ }
+	};
 	let heartbeatTimer: NodeJS.Timeout | undefined;
 	if (ctx.detachedInstanceId) {
 		process.env[DETACHED_CONTROL_CWD_ENV] = ctx.cwd;
@@ -192,8 +209,13 @@ try {
 		process.env[DETACHED_CONTROL_INSTANCE_ENV] = ctx.detachedInstanceId;
 		process.env[DETACHED_CONTROL_OWNER_PID_ENV] = String(process.pid);
 		heartbeatDetachedProcessRegistry(ctx.cwd, ctx.runId, ctx.detachedInstanceId);
+	}
+	if (ctx.detachedInstanceId || ctx.liveProgress) {
 		heartbeatTimer = setInterval(() => {
-			try { heartbeatDetachedProcessRegistry(ctx.cwd, ctx.runId, ctx.detachedInstanceId!); } catch { /* best-effort lease */ }
+			if (ctx.detachedInstanceId) {
+				try { heartbeatDetachedProcessRegistry(ctx.cwd, ctx.runId, ctx.detachedInstanceId); } catch { /* best-effort lease */ }
+			}
+			if (ctx.liveProgress) liveSave();
 		}, 1_000);
 		heartbeatTimer.unref();
 	}
@@ -273,7 +295,10 @@ try {
 		cwdBridgeMode: cwdBridgeModeFromEnv(),
 		agents,
 		globalThinking: ctx.globalThinking ?? settings.globalThinking,
-		persist: (s) => saveRun(s, cleanupConfig),
+		persist: checkpoint,
+		...(ctx.liveProgress
+			? { onProgress: (s: RunState) => { liveState = s; liveSave(); } }
+			: {}),
 		runTask: injectedRunner?.runTask,
 		usageAccounting: injectedRunner?.usageAccounting,
 		signal: abortController.signal,

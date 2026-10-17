@@ -8,7 +8,7 @@ import type { RunResult, RunOptions } from "../src/runner-core.ts";
 import { emptyUsage } from "../src/usage.ts";
 import { agentDefinitionsIdentity, executeTaskflow, type RuntimeDeps } from "../src/runtime.ts";
 import type { Taskflow } from "../src/schema.ts";
-import type { RunState } from "../src/store.ts";
+import { loadRun, saveRun, type RunState } from "../src/store.ts";
 import { parseGateVerdict } from "../src/runtime.ts";
 
 const AGENTS: AgentConfig[] = [
@@ -186,6 +186,54 @@ test("runtime: map fan-out spawns one task per array item", async () => {
 	assert.match(res.finalOutput, /done:process x/);
 	// completed fan-out must carry final sub-task counts (regression: showed 0✓)
 	assert.deepEqual(res.state.phases.work.subProgress, { done: 3, total: 3, running: 0, failed: 0 });
+});
+
+test("runtime: recon fan-out tracks out-of-order agent states by index", async () => {
+	const def: Taskflow = { name: "recon", concurrency: 2, phases: [{ id: "recon", type: "map", over: '["slow","fast"]', agent: "a", task: "{item}", final: true }] };
+	let releaseSlow!: () => void;
+	const slow = new Promise<void>((resolve) => { releaseSlow = resolve; });
+	let fastDone!: () => void;
+	const fast = new Promise<void>((resolve) => { fastDone = resolve; });
+	const snapshots: string[][] = [];
+	const runTask: RuntimeDeps["runTask"] = async (_cwd, _agents, agent, task) => {
+		if (task === "slow") await slow;
+		else fastDone();
+		return { agent, task, exitCode: 0, output: task, stderr: "", usage: { ...emptyUsage(), output: 3 } };
+	};
+	const state = mkState(def);
+	const pending = executeTaskflow(state, { ...baseDeps(runTask), onProgress: (s) => {
+		if (s.phases.recon?.items) snapshots.push(s.phases.recon.items.map((item) => item.status));
+	} });
+	await fast;
+	await new Promise((resolve) => setImmediate(resolve));
+	try {
+		assert.ok(snapshots.some((statuses) => statuses[0] === "running" && statuses[1] === "done"));
+	} finally {
+		releaseSlow();
+	}
+	const result = await pending;
+	assert.deepEqual(result.state.phases.recon.items?.map((item) => item.status), ["done", "done"]);
+});
+
+test("runtime: in-flight recon item state is persisted for another reader", async () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tf-recon-live-"));
+	let release!: () => void;
+	const hold = new Promise<void>((resolve) => { release = resolve; });
+	let started!: () => void;
+	const live = new Promise<void>((resolve) => { started = resolve; });
+	const def: Taskflow = { name: "recon-live", phases: [{ id: "recon", type: "map", over: '["one"]', task: "{item}", agent: "a", final: true }] };
+	const state = { ...mkState(def), cwd: dir, runId: "recon-live-1" };
+	const task: RuntimeDeps["runTask"] = async (_cwd, _agents, agent, task) => { started(); await hold; return { agent, task, exitCode: 0, output: "ok", stderr: "", usage: emptyUsage() }; };
+	const save = (s: RunState) => saveRun(s);
+	const pending = executeTaskflow(state, { ...baseDeps(task), cwd: dir, persist: save, onProgress: save });
+	try {
+		await live;
+		assert.equal(loadRun(dir, state.runId)?.phases.recon.items?.[0].status, "running");
+	} finally {
+		release();
+		await pending;
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
 });
 
 test("runtime: parallel branches run and merge", async () => {

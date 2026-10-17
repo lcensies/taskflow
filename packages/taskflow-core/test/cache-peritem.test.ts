@@ -295,6 +295,8 @@ test("per-item: partial hit charges only the re-executed item; subProgress refle
 	assert.equal(m.subProgress?.failed, 0, "no failures");
 	assert.equal(m.subProgress?.total, 3);
 	// summarizeReuse: the phase executed (partial hit) → counted as executed, not reused.
+	assert.deepEqual(m.items?.map((item) => item.status), ["done", "done", "done"]);
+	assert.equal(m.items?.[0].usage, undefined, "cache hits carry no measured spend");
 	const reuse = summarizeReuse(r2.state);
 	assert.equal(reuse.executed, 1, "the map phase is counted as executed (it ran 1 item)");
 	assert.equal(reuse.reusedCrossRun, 0, "no whole-phase cross-run hit on a partial run");
@@ -742,4 +744,36 @@ test("per-item: LITERAL over — a failed item is never cached (re-executes next
 	assert.equal(r2.state.phases.m.status, "done", "all items succeed on run2");
 	assert.match(r2.finalOutput, /out:process b#\d/, "item[1] now has a fresh successful output");
 	fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("whole-phase cross-run hit: map/parallel items keep status but drop the earlier run's spend/activity", async () => {
+	const dir = tmpDir();
+	try {
+		const def: Taskflow = {
+			name: "items-cross-run",
+			phases: [
+				{ id: "m", type: "map", agent: "a", over: "{args.items}", task: "process {item}", cache: { scope: "cross-run" } },
+				{ id: "p", type: "parallel", dependsOn: ["m"], branches: [{ agent: "a", task: "x" }, { agent: "b", task: "y" }], cache: { scope: "cross-run" }, final: true },
+			],
+		} as Taskflow;
+		const counter = { n: 0 };
+		const counting = countingRunner(counter);
+		const runTask: RuntimeDeps["runTask"] = async (cwd, agents, agent, task, o) => {
+			o.onLive?.({ text: `scanning ${task}`, usage: { ...emptyUsage(), output: 1 } });
+			return counting!(cwd, agents, agent, task, o);
+		};
+		const deps: RuntimeDeps = { cwd: dir, agents: AGENTS, runTask, cacheStore: new CacheStore(dir) };
+		const r1 = await executeTaskflow(mkState(def, dir, { items: ["a", "b"] }), deps);
+		const r2 = await executeTaskflow(mkState(def, dir, { items: ["a", "b"] }), deps);
+		assert.equal(counter.n, 4, "second run never reaches the runner");
+		for (const id of ["m", "p"]) {
+			const hit = r2.state.phases[id];
+			assert.equal(hit.cacheHit, "cross-run");
+			assert.deepEqual(hit.items, [{ agent: "a", status: "done" }, { agent: id === "m" ? "a" : "b", status: "done" }]);
+			const first = r1.state.phases[id].items!;
+			assert.ok(first.every((item) => item.usage?.output === 10 && /scanning/.test(item.liveText ?? "")), `${id} first record unchanged`);
+		}
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
 });

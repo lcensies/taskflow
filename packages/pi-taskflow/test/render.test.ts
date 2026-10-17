@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { renderFingerprint, renderProgress, renderRunResult, renderRunningActivity, summarizeRun } from "../src/render.ts";
+import { formatCost, formatUsage, renderFingerprint, renderProgress, renderRunResult, renderRunningActivity, summarizeRun } from "../src/render.ts";
 import { emptyUsage } from "taskflow-core";
 import type { Taskflow } from "taskflow-core";
 import type { PhaseState, RunState } from "taskflow-core";
@@ -316,7 +316,8 @@ test("renderRunResult: collapsed card keeps live activity on last line", () => {
 
 test("renderRunResult: collapsed card keeps timer on last line", () => {
 	const def: Taskflow = { name: "x", phases: [{ id: "p", type: "agent", task: "t", final: true }] };
-	const state = mkState(def, { p: { id: "p", status: "running", startedAt: 10_000, usage: emptyUsage() } });
+	const usage = { ...emptyUsage(), input: 1200, output: 300, cacheRead: 5000, cost: 0.00005 };
+	const state = mkState(def, { p: { id: "p", status: "running", startedAt: 10_000, usage } });
 	const now = Date.now;
 	try {
 		Date.now = () => 11_000;
@@ -325,10 +326,25 @@ test("renderRunResult: collapsed card keeps timer on last line", () => {
 		const second = renderRunResult(state, "", theme, false).render(80);
 		assert.deepEqual(first.slice(0, -1), second.slice(0, -1));
 		assert.notEqual(first.at(-1), second.at(-1));
+		assert.match(second.at(-1)!, /1\.5k tok · 5\.0k cached/);
 		assert.match(first.at(-2)!, /Ctrl\+O/);
 	} finally {
 		Date.now = now;
 	}
+});
+
+test("render usage: separates fresh/cache tokens and preserves small costs", () => {
+	const usage = { ...emptyUsage(), input: 10, output: 5, cacheWrite: 2, cacheRead: 100, cost: 0.00003 };
+	assert.equal(formatUsage(undefined), "");
+	assert.equal(formatUsage(emptyUsage()), "");
+	assert.equal(formatUsage(usage), "17 tok · 100 cached");
+	assert.equal(formatCost(usage.cost), "<$0.0001");
+	const def: Taskflow = { name: "x", phases: [{ id: "p", type: "agent", task: "t", final: true }] };
+	const state = mkState(def, { p: { id: "p", status: "running", startedAt: Date.now(), usage } });
+	const lines = renderRunResult(state, "", theme, false).render(40);
+	assert.ok(lines.every((line) => visibleWidth(line) <= 40));
+	assert.match(lines.at(-1)!, /17 tok · 100 cached/);
+	assert.match(lines.at(-1)!, /<\$0\.0001/);
 });
 
 test("renderFingerprint: stable for an unchanged state within the same second", () => {

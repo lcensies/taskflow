@@ -10,7 +10,7 @@ import type { Phase, Taskflow } from "../schema.ts";
 import { dependenciesOf, MAX_DYNAMIC_MAP_ITEMS, PHASE_TYPES } from "../schema.ts";
 import { readFileSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
-import type { RunState } from "../store.ts";
+import type { PhaseState, RunState } from "../store.ts";
 import type { DirectoryIdentity } from "../cwd-bridge.ts";
 import type { AgentConfig } from "../agents.ts";
 import type { RunOptions, RunResult } from "../host/runner-types.ts";
@@ -88,6 +88,8 @@ export interface StepDeps {
 	requestApproval?: (req: KernelApprovalRequest) => Promise<KernelApprovalDecision>;
 	loadFlow?: (name: string) => Taskflow | undefined;
 	loadSavedFlow?: (name: string) => { def: Taskflow; filePath?: string; sourceDirIdentity?: DirectoryIdentity } | undefined;
+	/** Live phase snapshots; observational and fail-open. */
+	onProgress?: (state: RunState) => void;
 	/** Sub-flow call stack (recursion guard). */
 	stack?: string[];
 	/** Nested flow runner (driver injects runEventKernel). */
@@ -98,6 +100,8 @@ export interface StepDeps {
 		dynamic?: boolean;
 		flowSourceFile?: string;
 		flowSourceDirIdentity?: DirectoryIdentity;
+		/** Parent flow phase that receives the child's live progress summary. */
+		phaseId?: string;
 	}) => Promise<NestedFlowResult>;
 }
 
@@ -133,6 +137,7 @@ export interface StepResult {
 		calls: Array<{ bytes: number; chars: number; estTokens: number }>;
 		reduceInputs?: { count: number; totalBytes: number; totalChars: number; totalEstTokens: number };
 	};
+	items?: PhaseState["items"];
 }
 
 type BodyResult = {
@@ -146,8 +151,23 @@ type BodyResult = {
 	gate?: StepResult["gate"];
 	approval?: StepResult["approval"];
 	warnings?: string[];
+	items?: PhaseState["items"];
 	promptStats?: StepResult["promptStats"];
 };
+function publishItems(ctx: StepContext, phaseId: string, items: NonNullable<PhaseState["items"]>): void {
+	const live = ctx.state.phases[phaseId];
+	if (!live) return;
+	live.items = items;
+	const statuses = items.map((item) => item.status);
+	live.subProgress = {
+		done: statuses.filter((status) => status === "done" || status === "failed" || status === "skipped").length,
+		total: items.length,
+		running: statuses.filter((status) => status === "running").length,
+		failed: statuses.filter((status) => status === "failed").length,
+	};
+	live.usage = aggregateUsage(items.map((item) => item.usage ?? emptyUsage()));
+	try { ctx.deps.onProgress?.(ctx.state); } catch { /* observational callback */ }
+}
 
 function baseEvent(
 	ctx: StepContext,
@@ -276,6 +296,7 @@ async function runOneAgent(
 	task: string,
 	nodePath: string,
 	mapIndex?: number,
+	onLive?: (update: { text: string; usage: UsageStats }) => void,
 ): Promise<{ result: RunResult; event: Event }> {
 	// Per-phase timeout: AbortController chained to run signal (matches runtime).
 	const phaseTimeoutMs =
@@ -358,6 +379,7 @@ async function runOneAgent(
 					cwd: effCwd,
 					signal: callSignal,
 					idleTimeoutMs: resolveIdleMs(phase, ctx.state.def),
+					onLive,
 					onTerminalCommit,
 				},
 				ctx.deps.globalThinking,
@@ -506,9 +528,14 @@ async function executeMapBody(phase: Phase, ctx: StepContext): Promise<BodyResul
 		task: resolveMapTask(phase.task ?? "", phase, ctx, item),
 	}));
 
+	const items: NonNullable<PhaseState["items"]> = tasks.map(({ agent }) => ({ agent, status: "pending" }));
+	const refresh = () => publishItems(ctx, phase.id, items);
+	refresh();
 	try {
 		const midEvents: Event[] = [];
 		const results = await mapWithConcurrencyLimit(tasks, concurrency, async (it, idx) => {
+			items[idx].status = "running";
+			refresh();
 			const { result, event } = await runOneAgent(
 				ctx,
 				phase,
@@ -516,8 +543,16 @@ async function executeMapBody(phase: Phase, ctx: StepContext): Promise<BodyResul
 				it.task,
 				`${phase.id}#item-${idx}`,
 				idx,
+				(update) => {
+					items[idx].usage = update.usage;
+					if (update.text) items[idx].liveText = update.text.replace(/\s+/g, " ").trim().slice(0, 200);
+					refresh();
+				},
 			);
 			midEvents.push(event);
+			items[idx].status = isFailedResult(result) ? "failed" : "done";
+			items[idx].usage = result.usage;
+			refresh();
 			return result;
 		});
 		// Order events by mapIndex for stable fold/trace
@@ -533,6 +568,7 @@ async function executeMapBody(phase: Phase, ctx: StepContext): Promise<BodyResul
 			status: anyTimedOut ? "timedOut" : anyFailed ? "failed" : "done",
 			error: errors.length ? errors.join("; ") : undefined,
 			usage,
+			items,
 			warnings: truncated
 				? [`map fan-out truncated to MAX_DYNAMIC_MAP_ITEMS (${MAX_DYNAMIC_MAP_ITEMS}) inside a dynamic sub-flow`]
 				: undefined,
@@ -559,10 +595,15 @@ async function executeParallelBody(phase: Phase, ctx: StepContext): Promise<Body
 		agent: b.agent ?? phase.agent ?? "executor",
 		task: interpolate(b.task, interpCtx).text,
 	}));
+	const items: NonNullable<PhaseState["items"]> = tasks.map(({ agent }) => ({ agent, status: "pending" }));
+	const refresh = () => publishItems(ctx, phase.id, items);
+	refresh();
 
 	try {
 		const midEvents: Event[] = [];
 		const results = await mapWithConcurrencyLimit(tasks, concurrency, async (it, idx) => {
+			items[idx].status = "running";
+			refresh();
 			const { result, event } = await runOneAgent(
 				ctx,
 				phase,
@@ -570,8 +611,16 @@ async function executeParallelBody(phase: Phase, ctx: StepContext): Promise<Body
 				it.task,
 				`${phase.id}#branch-${idx}`,
 				idx,
+				(update) => {
+					items[idx].usage = update.usage;
+					if (update.text) items[idx].liveText = update.text.replace(/\s+/g, " ").trim().slice(0, 200);
+					refresh();
+				},
 			);
 			midEvents.push(event);
+			items[idx].status = isFailedResult(result) ? "failed" : "done";
+			items[idx].usage = result.usage;
+			refresh();
 			return result;
 		});
 		midEvents.sort((a, b) => (a.input?.mapIndex ?? 0) - (b.input?.mapIndex ?? 0));
@@ -586,6 +635,7 @@ async function executeParallelBody(phase: Phase, ctx: StepContext): Promise<Body
 			status: anyTimedOut ? "timedOut" : anyFailed ? "failed" : "done",
 			error: errors.length ? errors.join("; ") : undefined,
 			usage,
+			items,
 		};
 	} catch (e) {
 		const err = e instanceof Error ? e.message : String(e);
@@ -689,6 +739,7 @@ export async function stepPhase(phase: Phase, ctx: StepContext): Promise<StepRes
 		gate: body.gate,
 		approval: body.approval,
 		warnings: body.warnings,
+		items: body.items,
 		promptStats: body.promptStats,
 	};
 }

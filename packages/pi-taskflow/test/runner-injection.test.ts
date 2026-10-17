@@ -58,6 +58,16 @@ function assertAllDepsInjectRunTask(): void {
 	assert.ok(inlineCount >= 1, `expected >=1 inline executeTaskflow(state,{...}) call (runFlow), found ${inlineCount}`);
 }
 
+test("regression: foreground run persists throttled live progress", () => {
+	const start = SRC.indexOf("async function runFlow(");
+	const end = SRC.indexOf("function statusPublisher", start);
+	const body = SRC.slice(start, end);
+	assert.match(body, /^\s*persist,$/m);
+	assert.match(body, /onProgress: persistThrottled/);
+	assert.match(body, /Date\.now\(\) - lastPersist >= 1000/);
+	assert.match(body, /statusTicker = setInterval\([\s\S]*persistThrottled\(state\)/);
+});
+
 test("regression: every executeTaskflow / recomputeTaskflow deps in pi index.ts injects runTask", () => {
 	assertAllDepsInjectRunTask();
 });

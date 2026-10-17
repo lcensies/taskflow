@@ -95,6 +95,62 @@ test("canUseEventKernel: workspace cwd keywords force the isolation-aware impera
 		assert.match(kernelUnsupportedReason(def) ?? "", /workspace cwd.*imperative runtime/);
 	}
 });
+test("event kernel: recon map tracks out-of-order items while running", async () => {
+	const def: Taskflow = { name: "kernel-recon", phases: [{ id: "recon", type: "map", over: '["slow","fast"]', task: "{item}", agent: "a", final: true }] };
+	let releaseSlow!: () => void;
+	const slow = new Promise<void>((resolve) => { releaseSlow = resolve; });
+	let fastDone!: () => void;
+	const fast = new Promise<void>((resolve) => { fastDone = resolve; });
+	const snapshots: string[][] = [];
+	const runTask: RuntimeDeps["runTask"] = async (_cwd, _agents, agent, task) => {
+		if (task === "slow") await slow; else fastDone();
+		return { agent, task, exitCode: 0, output: task, stderr: "", usage: { ...emptyUsage(), output: 2 } };
+	};
+	const pending = executeTaskflow(mkState(def), { cwd: process.cwd(), agents: AGENTS, runTask, eventKernel: true, onProgress: (s) => {
+		if (s.phases.recon?.items) snapshots.push(s.phases.recon.items.map((item) => item.status));
+	} });
+	await fast;
+	await new Promise((resolve) => setImmediate(resolve));
+	try {
+		assert.ok(snapshots.some((statuses) => statuses[0] === "running" && statuses[1] === "done"));
+	} finally {
+		releaseSlow();
+	}
+	const result = await pending;
+	assert.deepEqual(result.state.phases.recon.items?.map((item) => item.status), ["done", "done"]);
+});
+
+test("event kernel: nested flow progress reports the parent run, never the child record", async () => {
+	const def: Taskflow = { name: "kernel-parent", phases: [{ id: "child", type: "flow", final: true, def: {
+		name: "kernel-child", phases: [{ id: "recon", type: "map", over: '["slow","fast"]', task: "{item}", agent: "a", final: true }],
+	} }] };
+	let releaseSlow!: () => void;
+	const slow = new Promise<void>((resolve) => { releaseSlow = resolve; });
+	let fastDone!: () => void;
+	const fast = new Promise<void>((resolve) => { fastDone = resolve; });
+	const seen: string[] = [];
+	const nested: Array<RunState["phases"][string]["subProgress"]> = [];
+	const runTask: RuntimeDeps["runTask"] = async (_cwd, _agents, agent, task) => {
+		if (task === "slow") await slow; else fastDone();
+		return { agent, task, exitCode: 0, output: task, stderr: "", usage: emptyUsage() };
+	};
+	const pending = executeTaskflow(mkState(def), {
+		cwd: process.cwd(), agents: AGENTS, runTask, eventKernel: true,
+		persist: (s) => { seen.push(s.runId); },
+		onProgress: (s) => { seen.push(s.runId); nested.push(s.phases.child?.subProgress && { ...s.phases.child.subProgress }); },
+	});
+	await fast;
+	await new Promise((resolve) => setImmediate(resolve));
+	try {
+		assert.ok(nested.some((p) => p?.running === 1 && p.total === 1), "parent flow phase carries the nested summary");
+	} finally {
+		releaseSlow();
+	}
+	const result = await pending;
+	assert.equal(result.state.phases.child.status, "done");
+	assert.deepEqual([...new Set(seen)], ["ek-run"], "child state never reaches host callbacks");
+});
+
 test("event kernel: script phase captures stdout (zero tokens)", async () => {
 	const def: Taskflow = {
 		name: "ek-script",
