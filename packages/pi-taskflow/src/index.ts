@@ -906,13 +906,15 @@ function statusPublisher(ctx: Pick<ExtensionContext, "ui" | "hasUI">, flowName: 
 			const label = `tf:${flowName} ${summarizeRun(state)}`;
 			if (label === last) return;
 			last = label;
-			if (ctx.hasUI) ctx.ui.setStatus("taskflow", label);
+			// Optional call: some hosts (and test contexts) report hasUI without a
+			// status bar; the footer line is advisory and must never fail a run.
+			if (ctx.hasUI) ctx.ui?.setStatus?.("taskflow", label);
 			sidebar(["--label", label]);
 		},
 		clear() {
 			if (!last) return;
 			last = "";
-			if (ctx.hasUI) ctx.ui.setStatus("taskflow", undefined);
+			if (ctx.hasUI) ctx.ui?.setStatus?.("taskflow", undefined);
 			sidebar(["--clear"]);
 		},
 	};

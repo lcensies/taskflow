@@ -46,7 +46,7 @@ function assertAllDepsInjectRunTask(): void {
 	let inlineCount = 0;
 	while ((m = inlineRe.exec(SRC)) !== null) {
 		inlineCount++;
-		const block = SRC.slice(m.index, m.index + 1200);
+		const block = SRC.slice(m.index, m.index + 2000);
 		const end = block.indexOf("})");
 		const body = end > 0 ? block.slice(0, end) : block;
 		assert.ok(
@@ -62,9 +62,9 @@ test("regression: foreground run persists throttled live progress", () => {
 	const start = SRC.indexOf("async function runFlow(");
 	const end = SRC.indexOf("function statusPublisher", start);
 	const body = SRC.slice(start, end);
-	assert.match(body, /^\s*persist,$/m);
-	assert.match(body, /onProgress: persistThrottled/);
-	assert.match(body, /Date\.now\(\) - lastPersist >= 1000/);
+	assert.match(body, /persist: persistCheckpoint,/);
+	assert.match(body, /else persistThrottled\(s\)/);
+	assert.match(body, /Date\.now\(\) - lastPersist < 1000/);
 	assert.match(body, /statusTicker = setInterval\([\s\S]*persistThrottled\(state\)/);
 });
 
