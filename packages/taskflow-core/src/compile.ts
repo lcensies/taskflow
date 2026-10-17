@@ -22,6 +22,7 @@ import {
 } from "./schema.ts";
 import { verifyTaskflow, type TaskflowVerifier, type VerificationIssue, type VerificationResult } from "./verify.ts";
 import { scriptLintVerifier } from "./verifiers/script-lint.ts";
+import { expandVerify } from "./verify-slot.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -425,7 +426,9 @@ function buildReport(flow: Taskflow, verification: VerificationResult): string {
  * Compile a (already schema-valid) taskflow into a Mermaid diagram + verification
  * report. Pure function — zero tokens, no LLM, no I/O.
  */
-export function compileTaskflow(flow: Taskflow, opts: CompileOptions = {}): CompileResult {
+export function compileTaskflow(rawFlow: Taskflow, opts: CompileOptions = {}): CompileResult {
+	// The diagram shows what will run, so the verify slot is expanded first.
+	const flow = expandVerify(rawFlow);
 	// Merge built-in script-lint (default ON) with caller-supplied verifiers.
 	const verifiers: TaskflowVerifier[] = [];
 	if (opts.lint !== false) verifiers.push(scriptLintVerifier);
@@ -437,6 +440,7 @@ export function compileTaskflow(flow: Taskflow, opts: CompileOptions = {}): Comp
 			phases: flow.phases ?? [],
 			budget: flow.budget,
 			concurrency: flow.concurrency,
+			verify: flow.verify,
 		},
 		{ verifiers: verifiers.length ? verifiers : undefined },
 	);

@@ -605,6 +605,34 @@ export const TaskflowSchema = Type.Object(
 			),
 		),
 		phases: Type.Array(PhaseSchema, { minItems: 1, description: "Ordered phase definitions (DAG via dependsOn)" }),
+		/**
+		 * Verification tail slot (see verify-slot.ts). Omitted → the canonical
+		 * reviewer/fixer loop + black-box tester is appended after the terminal
+		 * phases whenever an implementation agent is present; an object tunes
+		 * that tail; an array is the author's own tail; `false` opts out.
+		 */
+		verify: Type.Optional(
+			Type.Union([
+				Type.Literal(false),
+				Type.Array(PhaseSchema),
+				Type.Object(
+					{
+						testCmd: Type.Optional(Type.String()),
+						specs: Type.Optional(Type.Array(Type.String())),
+						design: Type.Optional(Type.Array(Type.String())),
+						findingsDir: Type.Optional(Type.String()),
+						harnessUp: Type.Optional(Type.String()),
+						harnessDown: Type.Optional(Type.String()),
+						replay: Type.Optional(Type.String()),
+						redteam: Type.Optional(Type.Boolean()),
+						rounds: Type.Optional(Type.Integer({ minimum: 1 })),
+						fixer: Type.Optional(Type.String()),
+						operator: Type.Optional(Type.String()),
+					},
+					{ additionalProperties: false },
+				),
+			]),
+		),
 	},
 	{ additionalProperties: false },
 );

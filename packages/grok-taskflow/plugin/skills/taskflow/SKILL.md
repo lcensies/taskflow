@@ -661,6 +661,35 @@ phases array, or interpolated `{steps.plan.json}`). Two modes:
 }
 ```
 
+### Verification tail (`verify` slot)
+
+Any flow with an implementation agent (`executor*`, `test-engineer`) gets a
+**verification tail** appended after its terminal phases unless it already
+has a `gate` of its own: `fix` + `fix-harness` → [`build`] → [`harness-up` →
+`replay` →] `exercise-operator` (black-box, `blackbox-operator`) → [`harness-down`]
+→ four review lenses (`spec-review`, `risk-review`, `security-review`,
+`quality-review`, each JSON `{findings, blocking}`) → `verdict` (gate,
+`final-arbiter`, zero-token `eval` first, `onBlock: "retry"` re-runs from
+`fix`, writes `FINDINGS.md` between rounds) → `report` (final). The
+implementation phases' task text is injected into the lenses as the spec
+when no spec files are wired.
+
+```jsonc
+// omitted  → canonical tail, defaults (no build script, 2 rounds)
+"verify": { "testCmd": "just check-ci", "specs": ["openspec/changes/x/specs/a/spec.md", "openspec/changes/x/tasks.md"],
+            "design": ["openspec/changes/x/design.md"], "findingsDir": "openspec/changes/x",
+            "harnessUp": "tests/harness/up.sh", "harnessDown": "tests/harness/down.sh",
+            "replay": "tests/harness/replay.sh", "rounds": 2, "redteam": false,
+            "fixer": "executor-expert", "operator": "blackbox-operator" }   // tune it
+"verify": [ /* your own tail phases; ones without dependsOn hang off the terminals */ ]
+"verify": false   // opt out (mechanical change, no review wanted)
+```
+
+`verify`/`compile`/`plan` show the expanded DAG. **Lint error** when a flow has
+implementation agents and ends up with no `gate` (e.g. `verify: []`, or an
+explicit tail without one) — only `verify: false` silences it. Tail phase ids
+(`fix`, `build`, `verdict`, …) are reserved while the canonical tail is in use.
+
 ### Budget (observed-usage stop-loss)
 
 Add a run-wide stop-loss at the top level. Ordinary budgeted DAG layers and

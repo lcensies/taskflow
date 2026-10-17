@@ -70,7 +70,7 @@ test("claude mcp: taskflow_verify dispatches through the claude binding (no exec
 			params: {
 				name: "taskflow_verify",
 				arguments: {
-					define: { name: "x", phases: [{ id: "a", type: "agent", agent: "executor", task: "do", final: true }] },
+					define: { name: "x", verify: false, phases: [{ id: "a", type: "agent", agent: "executor", task: "do", final: true }] },
 				},
 			},
 		},

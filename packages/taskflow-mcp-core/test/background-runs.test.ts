@@ -58,6 +58,7 @@ function removeTempDir(dir: string): void {
 function inlineAgentFlow(name: string): Taskflow {
 	return {
 		name,
+		verify: false,
 		phases: [{ id: "work", type: "agent", agent: "executor", task: "work", final: true }],
 	};
 }
@@ -544,6 +545,7 @@ test("mcp background: hard-killed worker reaps its registered Host CLI tree", as
 		});
 		const flow: Taskflow = {
 			name: "hard-kill",
+			verify: false,
 			phases: [{ id: "work", type: "agent", agent: "executor", task: heartbeat, final: true }],
 		};
 		const started = await tools.taskflow_run({ define: flow, mode: "background" }) as TextResult;

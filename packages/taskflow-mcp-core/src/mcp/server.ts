@@ -59,6 +59,7 @@ import {
 	compileTaskflow,
 	verifyTaskflow,
 	desugar,
+	expandVerify,
 	isShorthand,
 	validateTaskflow,
 	resolveArgs,
@@ -810,7 +811,7 @@ function resolveFlowWithSource(cwd: string, params: { name?: string; define?: un
 	}
 	if (params.define !== undefined && params.define !== null) {
 		return {
-			def: isShorthand(params.define) ? desugar(params.define) : (params.define as Taskflow),
+			def: expandVerify(isShorthand(params.define) ? desugar(params.define) : (params.define as Taskflow)),
 			flowSourceFile,
 			flowSourceDirIdentity,
 		};
@@ -819,7 +820,7 @@ function resolveFlowWithSource(cwd: string, params: { name?: string; define?: un
 		const r = getFlowDiagnosed(cwd, params.name);
 		if (!r.ok) throw new RpcError(RPC.INVALID_PARAMS, describeLoadFailure(r, `Saved flow "${params.name}"`));
 		return {
-			def: r.value.def,
+			def: expandVerify(r.value.def),
 			flowSourceFile: r.value.filePath,
 			flowSourceDirIdentity: r.value.sourceDirIdentity,
 		};

@@ -20,6 +20,7 @@ export * from "./runtime.ts";
 export * from "./cache.ts";
 export * from "./interpolate.ts";
 export * from "./verify.ts";
+export * from "./verify-slot.ts";
 export * from "./usage.ts";
 export * from "./rates.ts";
 export * from "./stale.ts";

@@ -13,6 +13,7 @@ import type { Phase } from "./schema.ts";
 import { asArray, dependenciesOf, LOOP_DEFAULT_MAX_ITERATIONS } from "./schema.ts";
 import { type OutputContract } from "./contract.ts";
 import { detectEffectsIssues } from "./verifiers/effects-lint.ts";
+import { detectMissingVerifyTail } from "./verify-slot.ts";
 import type { ComposedEffectFlowLike } from "./effects/validate.ts";
 
 // ---------------------------------------------------------------------------
@@ -29,6 +30,7 @@ export type IssueCategory =
 	| "guard-contradiction"
 	| "contract"
 	| "effects"
+	| "verify-tail"
 	| "plugin";
 
 export interface VerificationIssue {
@@ -54,6 +56,8 @@ export interface VerifiableFlow {
 	phases: Phase[];
 	budget?: { maxUSD?: number; maxTokens?: number };
 	concurrency?: number;
+	/** The flow-level `verify` slot. `false` opts out of the verify-tail check. */
+	verify?: unknown;
 }
 
 /** A single finding from a caller-supplied verifier. The engine stamps
@@ -648,6 +652,7 @@ export function verifyTaskflow(flow: VerifiableFlow, options?: VerifyOptions): V
 	issues.push(...detectContractRefMismatches(phases));
 	// Trusted Effects (0.3): static EffectIR checks when a phase carries effects[]
 	issues.push(...detectEffectsIssues(safeFlow, { resolveFlow: options?.resolveFlow }));
+	issues.push(...detectMissingVerifyTail(safeFlow));
 
 	// Caller-supplied verifiers run last, against an isolated deep-frozen snapshot
 	// of the sanitized flow (so a verifier cannot mutate the real execution plan

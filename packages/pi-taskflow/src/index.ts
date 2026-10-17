@@ -67,7 +67,7 @@ import {
 	type DirectoryIdentity,
 } from "taskflow-core";
 import { type UsageStats } from "taskflow-core";
-import { resolveArgs, type Taskflow, validateTaskflow, desugar, isShorthand } from "taskflow-core";
+import { resolveArgs, type Taskflow, validateTaskflow, desugar, isShorthand, expandVerify } from "taskflow-core";
 import {
 	deleteFlow,
 	deleteRun,
@@ -1382,12 +1382,17 @@ export default function (pi: ExtensionAPI) {
 				if (!def) {
 					return errorResult(action, "Provide 'define' (DSL) or 'name' (saved flow) to verify.");
 				}
+				try {
+					def = expandVerify(def);
+				} catch (e) {
+					return errorResult(action, e instanceof Error ? e.message : String(e));
+				}
 				// Schema validation first
 				const vr = validateTaskflow(def, { cwd: ctx.cwd ? String(ctx.cwd) : undefined });
 				if (!vr.ok) {
 					return errorResult(action, `Schema validation failed:\n${vr.errors.join("\n")}`);
 				}
-				const result = verifyTaskflow({ name: def.name!, phases: def.phases!, budget: def.budget, concurrency: def.concurrency });
+				const result = verifyTaskflow({ name: def.name!, phases: def.phases!, budget: def.budget, concurrency: def.concurrency, verify: def.verify });
 				const lines: string[] = [];
 				lines.push(`# Verification of "${def.name}"`);
 				lines.push("");
@@ -1487,6 +1492,11 @@ export default function (pi: ExtensionAPI) {
 				}
 				if (!def) {
 					return errorResult(action, "Provide 'define' (DSL) or 'name' (saved flow) to compile to IR.");
+				}
+				try {
+					def = expandVerify(def);
+				} catch (e) {
+					return errorResult(action, e instanceof Error ? e.message : String(e));
 				}
 				// Schema validation first so a malformed graph gives a clean error.
 				const vr = validateTaskflow(def, { cwd: ctx.cwd ? String(ctx.cwd) : undefined });
@@ -1896,6 +1906,13 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			// run
+			// Saved definitions keep their `verify` slot as authored; it is resolved
+			// into phases here, once, so the run state (and resume) see the real DAG.
+			try {
+				def = expandVerify(def);
+			} catch (e) {
+				return errorResult(action, e instanceof Error ? e.message : String(e));
+			}
 			// Auto-parse string args — LLMs sometimes pass a JSON string.
 			let resolvedArgs: Record<string, unknown> | undefined;
 			if (typeof params.args === "string") {

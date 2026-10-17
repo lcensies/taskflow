@@ -123,7 +123,7 @@ test("mcp: tools/call taskflow_verify validates an inline flow without executing
 			params: {
 				name: "taskflow_verify",
 				arguments: {
-					define: { name: "x", phases: [{ id: "a", type: "agent", agent: "executor", task: "do", final: true }] },
+					define: { name: "x", verify: false, phases: [{ id: "a", type: "agent", agent: "executor", task: "do", final: true }] },
 				},
 			},
 		},
@@ -159,7 +159,7 @@ test("mcp: tools/call taskflow_verify validates a flow from defineFile (shared o
 	const fs = await import("node:fs");
 	const os = await import("node:os");
 	const path = await import("node:path");
-	const def = { name: "from-file", phases: [{ id: "a", type: "agent", agent: "executor", task: "do", final: true }] };
+	const def = { name: "from-file", verify: false, phases: [{ id: "a", type: "agent", agent: "executor", task: "do", final: true }] };
 	const f = path.join(os.tmpdir(), `tf-definefile-${process.pid}-${Date.now()}.json`);
 	fs.writeFileSync(f, JSON.stringify(def));
 	try {
@@ -405,7 +405,7 @@ test("mcp: taskflow_verify is conclusion-first and dedupes same-rule hits", asyn
 
 test("mcp: taskflow_verify passes cleanly with a single line for a good flow", async () => {
 	const tools = makeToolHandlers(process.cwd());
-	const define = { name: "ok", phases: [{ id: "a", type: "agent", agent: "executor", task: "do", final: true }] };
+	const define = { name: "ok", verify: false, phases: [{ id: "a", type: "agent", agent: "executor", task: "do", final: true }] };
 	const res = (await tools.taskflow_verify({ define })) as { content: { text: string }[]; isError: boolean };
 	assert.equal(res.content[0].text, "✓ verification PASSED");
 	assert.equal(res.isError, false);
@@ -486,6 +486,7 @@ test("mcp: taskflow_compile returns an SVG image block for a small flow", async 
 	const tools = makeToolHandlers(process.cwd());
 	const define = {
 		name: "tiny",
+		verify: false,
 		phases: [
 			{ id: "a", type: "agent", agent: "executor", task: "one" },
 			{ id: "b", type: "agent", agent: "executor", task: "two", dependsOn: ["a"], final: true },
@@ -521,7 +522,7 @@ test("mcp: taskflow_compile falls back to text-only (with outline) for a huge fl
 		...(i ? { dependsOn: [`p${i - 1}`] } : {}),
 		...(i === 79 ? { final: true } : {}),
 	}));
-	const res = (await tools.taskflow_compile({ define: { name: "huge", phases } })) as {
+	const res = (await tools.taskflow_compile({ define: { name: "huge", verify: false, phases } })) as {
 		content: { type: string; text?: string }[];
 	};
 	assert.ok(!res.content.some((c) => c.type === "image"), "no image for an oversized graph");

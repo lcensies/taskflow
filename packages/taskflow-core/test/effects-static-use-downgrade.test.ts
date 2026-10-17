@@ -92,6 +92,7 @@ test("S-H2: benign saved flow{use} + downstream declared write passes static gat
 		};
 		const def: Taskflow = {
 			name: "saved-parent-write",
+			verify: false,
 			phases: [
 				{ id: "child", type: "flow", use: child.name },
 				{

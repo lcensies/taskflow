@@ -25,6 +25,7 @@ import {
 	verifyTaskflow,
 	type TaskflowVerifier,
 } from "./verify.ts";
+import { expandVerify } from "./verify-slot.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -328,6 +329,7 @@ export function preflightTaskflow(raw: unknown, opts: PreflightOptions = {}): Pr
 			// Last chance: treat as shorthand or invalid
 			flow = desugar(raw);
 		}
+		flow = expandVerify(flow);
 	} catch (e) {
 		const msg = e instanceof Error ? e.message : String(e);
 		return {

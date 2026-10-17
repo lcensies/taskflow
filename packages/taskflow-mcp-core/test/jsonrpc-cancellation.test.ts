@@ -439,6 +439,7 @@ test("taskflow_run rejects a missing required typed arg before spawning", async 
 		define: {
 			name: "missing-cwd-arg",
 			args: { package: { type: "relative-path", required: true } },
+			verify: false,
 			phases: [{ id: "run", type: "agent", agent: "executor", task: "go", cwd: "{args.package}", final: true }],
 		},
 	})) as { isError?: boolean; content?: Array<{ text?: string }> };
@@ -461,6 +462,7 @@ test("a host without usage accounting refuses budgeted runs before spawning", as
 		define: {
 			name: "budgeted-grok",
 			budget: { maxTokens: 1 },
+			verify: false,
 			phases: [{ id: "run", type: "agent", agent: "executor", task: "go", final: true }],
 		},
 	})) as { isError?: boolean; content?: Array<{ text?: string }> };
@@ -483,6 +485,7 @@ test("a tokens-only host accepts maxTokens but refuses maxUSD before spawning", 
 		define: {
 			name: "token-budget",
 			budget: { maxTokens: 10 },
+			verify: false,
 			phases: [{ id: "run", type: "agent", agent: "executor", task: "go", final: true }],
 		},
 	})) as { isError?: boolean };
@@ -493,6 +496,7 @@ test("a tokens-only host accepts maxTokens but refuses maxUSD before spawning", 
 		define: {
 			name: "dollar-budget",
 			budget: { maxUSD: 1 },
+			verify: false,
 			phases: [{ id: "run", type: "agent", agent: "executor", task: "go", final: true }],
 		},
 	})) as { isError?: boolean; content?: Array<{ text?: string }> };

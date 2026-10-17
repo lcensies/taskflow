@@ -990,7 +990,8 @@ async function runInlineSubflow(
 		const error = `spawned subflow failed validation: ${v.errors.join("; ")}`;
 		return { output: `(${error})`, usage: emptyUsage(), failed: true, error };
 	}
-	const ver = verifyTaskflow({ name: wrapped.name, phases: wrapped.phases as Phase[], budget: wrapped.budget, concurrency: wrapped.concurrency }, { verifiers: deps.verifiers });
+	// verify:false — a nested child never carries its own verification tail; that is the parent's.
+	const ver = verifyTaskflow({ name: wrapped.name, phases: wrapped.phases as Phase[], budget: wrapped.budget, concurrency: wrapped.concurrency, verify: false }, { verifiers: deps.verifiers });
 	if (!ver.ok) {
 		const errs = ver.issues.filter((i) => i.severity === "error").map((i) => i.message);
 		const error = `spawned subflow failed verification: ${errs.join("; ")}`;
@@ -3138,7 +3139,7 @@ async function executePhaseInner(
 			//    below, runInlineSubflow, the event kernel (runNested), and the top-level
 			//    preflight. Without this an inline-def child would silently bypass a
 			//    plugin block with res.ok=true (review of #84).
-			const ver = verifyTaskflow({ name: wrapped.name, phases: wrapped.phases as Phase[], budget: wrapped.budget, concurrency: wrapped.concurrency }, { verifiers: deps.verifiers });
+			const ver = verifyTaskflow({ name: wrapped.name, phases: wrapped.phases as Phase[], budget: wrapped.budget, concurrency: wrapped.concurrency, verify: false }, { verifiers: deps.verifiers });
 			const inlinePluginErrors = ver.issues.filter((i) => i.category === "plugin" && i.severity === "error");
 			if (inlinePluginErrors.length) {
 				return failPhase(phase.id, `flow phase '${phase.id}': inline def '${wrapped.name}' failed verifier preflight: ${formatPluginIssueMessages(inlinePluginErrors).join("; ")}`);
