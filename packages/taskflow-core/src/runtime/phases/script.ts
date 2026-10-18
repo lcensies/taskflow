@@ -69,9 +69,12 @@ export async function runScriptCommand(opts: {
 	signal?: AbortSignal;
 	stdinInput?: string;
 	timeoutMs: number;
+	/** Latest non-empty stdout/stderr line as the child writes — activity only, never the captured output. */
+	onLive?: (text: string) => void;
 }): Promise<ScriptRunResult> {
 	const { spawn } = await import("node:child_process");
-	const { interpRunText, arrayForm, cwd, signal, stdinInput, timeoutMs } = opts;
+	const { interpRunText, arrayForm, cwd, signal, stdinInput, timeoutMs, onLive } = opts;
+	const lastLine = (chunk: string): string | undefined => chunk.split(/\r?\n/).reverse().find((l) => l.trim());
 
 	return new Promise((resolve, reject) => {
 		// This is deliberately inside the post-import Promise executor: no await or
@@ -112,8 +115,11 @@ export async function runScriptCommand(opts: {
 			const remaining = MAX_STDOUT - stdoutBytes;
 			const retained = d.subarray(0, Math.max(0, remaining));
 			if (retained.length > 0) {
-				stdout += stdoutDecoder.write(retained);
+				const text = stdoutDecoder.write(retained);
+				stdout += text;
 				stdoutBytes += retained.length;
+				const line = onLive && lastLine(text);
+				if (line) onLive(line);
 			}
 			if (d.length > retained.length) stdoutOversize = true;
 		});
@@ -121,8 +127,11 @@ export async function runScriptCommand(opts: {
 			const remaining = 500 - stderrBytes;
 			const retained = d.subarray(0, Math.max(0, remaining));
 			if (retained.length > 0) {
-				stderr += stderrDecoder.write(retained);
+				const text = stderrDecoder.write(retained);
+				stderr += text;
 				stderrBytes += retained.length;
+				const line = onLive && lastLine(text);
+				if (line) onLive(line);
 			}
 		});
 

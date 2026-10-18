@@ -161,6 +161,36 @@ test("script run: array form spawns directly (no shell)", async () => {
 	assert.equal(res.finalOutput, "arr-ok");
 });
 
+test("script run: command and latest stdout/stderr line stream into liveLog; output unchanged", async () => {
+	const def: Taskflow = {
+		name: "s",
+		phases: [{ id: "a", type: "script", run: ["node", "-e", "console.log('one');console.error('warn');console.log('two')"], final: true }],
+	};
+	const seen: string[] = [];
+	const deps = baseDeps();
+	deps.onProgress = (s) => {
+		const t = s.phases.a?.liveText;
+		if (t && seen.at(-1) !== t) seen.push(t);
+	};
+	const res = await executeTaskflow(mkState(def), deps);
+	assert.equal(res.ok, true);
+	assert.equal(res.finalOutput, "one\ntwo");
+	const log = res.state.phases.a.liveLog ?? [];
+	assert.equal(log[0], "$ node -e console.log('one');console.error('warn');console.log('two')");
+	assert.ok(log.includes("two"), JSON.stringify(log));
+	assert.ok(log.includes("warn"), JSON.stringify(log));
+	assert.equal(seen[0], log[0]);
+	assert.ok(seen.length >= 2, "onProgress fired while the script ran");
+});
+
+test("script run: silent command records only the command line", async () => {
+	const def: Taskflow = { name: "s", phases: [{ id: "a", type: "script", run: "true", final: true }] };
+	const res = await executeTaskflow(mkState(def), baseDeps());
+	assert.equal(res.ok, true);
+	assert.deepEqual(res.state.phases.a.liveLog, ["$ true"]);
+	assert.equal(res.finalOutput, "");
+});
+
 test("script run: scriptCwd flow uses the flow file directory", async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "tf-script-flow-cwd-"));
 	try {

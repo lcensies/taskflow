@@ -15,7 +15,7 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { isKeyRelease, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { type Phase, type PhaseState, type ReattachState, type RunState, splitItems } from "taskflow-core";
-import { backEdgeAnnotation, formatCost, formatUsage } from "./render.ts";
+import { backEdgeAnnotation, formatCost, formatUsage, roleOf } from "./render.ts";
 import { ScrollPane } from "./scroll-pane.ts";
 import { renderTranscript, TranscriptTail } from "./transcript-view.ts";
 
@@ -152,7 +152,7 @@ function phaseLine(
 				? theme.fg("warning", " unrecorded")
 				: "";
 	const steered = ps?.steered ? theme.fg("accent", " ⇢") : "";
-	const role = phase.agent ?? phase.type ?? "agent";
+	const role = roleOf(phase);
 	const model = ps?.model ? shortModel(ps.model) : planned ? `~${shortModel(planned)}` : "";
 	const who = theme.fg("dim", `  ${role}${model ? `（${model}）` : ""}`);
 	return `${now}${badge} ${label}${fanout}${reattachNote}${steered}${who}${backEdgeAnnotation(phase, ps, theme)}`;

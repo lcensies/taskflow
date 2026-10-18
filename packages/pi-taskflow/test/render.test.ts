@@ -314,6 +314,25 @@ test("renderRunResult: collapsed card keeps live activity on last line", () => {
 	assert.match(second.at(-1)!, /two/);
 });
 
+test("renderRunResult: script rows show the command, not the type, plus live text while running", () => {
+	const def: Taskflow = {
+		name: "x",
+		phases: [
+			{ id: "build", type: "script", run: "pnpm run build" },
+			{ id: "test", type: "script", run: ["node", "--test", "a-very-long-test-file-name-that-keeps-going.test.ts"], dependsOn: ["build"], final: true },
+		],
+	};
+	const state = mkState(def, {
+		build: { id: "build", status: "running", startedAt: Date.now(), liveText: "compiling 12 files", usage: emptyUsage() },
+	});
+	const out = renderRunResult(state, "", theme, false).render(120).join("\n");
+	assert.match(out, /\$ pnpm run build/);
+	assert.match(out, /compiling 12 files/);
+	assert.match(out, /\$ node --test a-very-long-test-file-name-t…/);
+	assert.doesNotMatch(out, /keeps-going/);
+	assert.doesNotMatch(out, /script\s+script/);
+});
+
 test("renderRunResult: collapsed card keeps timer on last line", () => {
 	const def: Taskflow = { name: "x", phases: [{ id: "p", type: "agent", task: "t", final: true }] };
 	const usage = { ...emptyUsage(), input: 1200, output: 300, cacheRead: 5000, cost: 0.00005 };

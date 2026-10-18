@@ -2818,6 +2818,12 @@ async function executePhaseInner(
 		if (cached) return cached;
 
 		const SCRIPT_TIMEOUT_MS = phase.timeout ?? 60_000;
+		const live = state.phases[phase.id];
+		const onLive = (text: string) => {
+			pushLive(live, text);
+			emitProgress();
+		};
+		onLive(`$ ${interpRunText.join(" ")}`);
 		try {
 			const invoke = () => runScriptCommand({
 				interpRunText,
@@ -2829,6 +2835,7 @@ async function executePhaseInner(
 				signal: deps.signal,
 				stdinInput,
 				timeoutMs: SCRIPT_TIMEOUT_MS,
+				onLive,
 			});
 			const result = deps._workspaceBinding
 				? await deps._workspaceBinding.runScript({ unitId: phase.id, signal: deps.signal, invoke })

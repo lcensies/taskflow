@@ -75,8 +75,17 @@ function miniBar(done: number, total: number, theme: Theme, width = 8): string {
 	return theme.fg("accent", "━".repeat(filled)) + theme.fg("dim", "─".repeat(width - filled));
 }
 
+/** Role column text: agent name, or the command for a script phase (the type badge already says "script"). */
+export function roleOf(phase: Phase): string {
+	if (phase.type === "script" && phase.run) {
+		const cmd = (Array.isArray(phase.run) ? phase.run.join(" ") : phase.run).replace(/\s+/g, " ").trim();
+		return `$ ${cmd.length > 40 ? `${cmd.slice(0, 40)}…` : cmd}`;
+	}
+	return phase.agent ?? phase.type ?? "agent";
+}
+
 function agentRole(phase: Phase, ps: PhaseState | undefined, theme: Theme, planned?: string): string {
-	const role = phase.agent ?? phase.type ?? "agent";
+	const role = roleOf(phase);
 	// `~` marks a model that is only planned (resolved from the definition /
 	// agent) rather than the one a started phase actually ran on.
 	const model = ps?.model ? shortModel(ps.model) : planned ? `~${shortModel(planned)}` : "";
@@ -169,7 +178,7 @@ function phaseDetailInner(phase: Phase, ps: PhaseState | undefined, theme: Theme
 	// Not started: show what it WILL run as (role + planned model) instead of a
 	// dash — the model a step is about to use is the thing users ask for.
 	if (!ps || ps.status === "pending") {
-		const role = phase.agent ?? type;
+		const role = roleOf(phase);
 		const model = planned ? theme.fg("dim", `（~${shortModel(planned)}）`) : "";
 		return theme.fg("dim", role) + model;
 	}
