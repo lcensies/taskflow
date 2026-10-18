@@ -661,10 +661,12 @@ function unreplayableReason(state: RunState, phase: Phase): "context-sharing" | 
 export const LIVE_LOG_MAX = 20;
 
 /** Record one activity line: sets `liveText` and appends to the bounded ring.
- *  Consecutive duplicates are collapsed (a re-emitted tick is not new activity). */
-function pushLive(ps: PhaseState | undefined, text: string | undefined): void {
+ *  Consecutive duplicates are collapsed (a re-emitted tick is not new activity).
+ *  A streaming tail only sets `liveText`: the ring stays turn-granular. */
+function pushLive(ps: PhaseState | undefined, text: string | undefined, streaming?: boolean): void {
 	if (!ps) return;
 	ps.liveText = text;
+	if (streaming) return;
 	const line = text?.trim();
 	if (!line) return;
 	const log = ps.liveLog ?? (ps.liveLog = []);
@@ -677,11 +679,13 @@ function liveSink(state: RunState, phaseId: string, emitProgress: () => void): (
 	return (l: LiveUpdate) => {
 		const live = state.phases[phaseId];
 		if (live) {
-			pushLive(live, l.text);
+			pushLive(live, l.text, l.streaming);
 			live.usage = l.usage;
 			live.model = l.model;
 		}
-		emitProgress();
+		// The host's render heartbeat picks streamed text up from state; signalling
+		// progress would also advance the host's throttled persist clock.
+		if (!l.streaming) emitProgress();
 	};
 }
 
@@ -2140,18 +2144,21 @@ async function executePhaseInner(
 		const total = items.length;
 		const live = state.phases[phase.id];
 		const liveUsages: UsageStats[] = items.map(() => emptyUsage());
+		// Turn-level text only: a streamed tail must never reach liveLog via a
+		// later sibling refresh.
 		let latestText = "";
 		const itemsState: NonNullable<PhaseState["items"]> = items.map(({ agent }) => ({ agent, status: "pending" }));
 		if (live && (type === "map" || type === "parallel")) live.items = itemsState;
 		let latestModel: string | undefined;
-		const refresh = () => {
+		const refresh = (streamed?: string) => {
 			if (live) {
 				live.subProgress = { done, total, running, failed };
 				live.usage = aggregateUsage(liveUsages);
-				pushLive(live, latestText);
+				if (streamed === undefined) pushLive(live, latestText);
+				else live.liveText = streamed;
 				live.model = latestModel;
 			}
-			emitProgress();
+			if (streamed === undefined) emitProgress();
 		};
 		refresh();
 		// Usage is only authoritative after a call reports it. Serial admission for
@@ -2207,9 +2214,9 @@ async function executePhaseInner(
 				liveUsages[idx] = l.usage;
 				itemsState[idx].usage = l.usage;
 				if (l.text) itemsState[idx].liveText = l.text.replace(/\s+/g, " ").trim().slice(0, 200);
-				if (l.text) latestText = l.text;
+				if (l.text && !l.streaming) latestText = l.text;
 				if (l.model) latestModel = l.model;
-				refresh();
+				refresh(l.streaming ? l.text : undefined);
 			}, nodeIdFor(String(idx)), undefined, undefined, it.cwd);
 			running--;
 			done++;
@@ -3309,7 +3316,13 @@ async function executePhaseInner(
 						failed: ph.filter((p) => p.status === "failed").length,
 					};
 					const cur = ph.find((p) => p.status === "running");
-					if (cur) pushLive(live, `↳ ${cur.id}${cur.liveText ? `: ${cur.liveText}` : ""}`);
+					if (cur) {
+						// cur.liveText may be a streamed tail: only its last turn-level
+						// line enters the ring.
+						const turn = cur.liveLog?.at(-1);
+						pushLive(live, `↳ ${cur.id}${turn ? `: ${turn}` : ""}`);
+						live.liveText = `↳ ${cur.id}${cur.liveText ? `: ${cur.liveText}` : ""}`;
+					}
 					live.usage = aggregateUsage(ph.map((p) => p.usage ?? emptyUsage()));
 				}
 				emitProgress();

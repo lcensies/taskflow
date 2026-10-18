@@ -13,6 +13,8 @@
  */
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { emptyUsage, type UsageStats } from "./usage.ts";
 import type { AgentConfig } from "./agents.ts";
@@ -121,12 +123,24 @@ export function looksLikeHtmlOrJson(s: string): boolean {
  * happen at the boundary where the text enters run state.
  */
 export function stripControlSequences(raw: string): string {
-	return raw
-		.replace(/\u001b\][\s\S]*?(?:\u0007|\u001b\\)/g, "") // OSC ... BEL | ST
-		.replace(/\u001b[[\]()#;?]*[0-9;?]*[ -/]*[@-~]/g, "") // CSI and friends
+	return stripEscapeSequences(raw)
 		.replace(/[\u0000-\u001f\u007f]+/g, " ") // leftover C0 + DEL
 		.replace(/ {2,}/g, " ")
 		.trim();
+}
+
+/**
+ * `stripControlSequences` for multi-line display text: removes OSC/CSI and
+ * every C0 control except `\n` and `\t`, leaving the layout untouched.
+ */
+export function stripTerminalControls(raw: string): string {
+	return stripEscapeSequences(raw).replace(/[\u0000-\u0008\u000b-\u001f\u007f]+/g, "");
+}
+
+function stripEscapeSequences(raw: string): string {
+	return raw
+		.replace(/\u001b\][\s\S]*?(?:\u0007|\u001b\\)/g, "") // OSC ... BEL | ST
+		.replace(/\u001b[[\]()#;?]*[0-9;?]*[ -/]*[@-~]/g, ""); // CSI and friends
 }
 
 /**
@@ -547,6 +561,11 @@ export interface RunSubagentProcessOptions<TAcc extends SubagentAccumulator> {
 	 * fold/completion semantics. A throwing sink is caught once, then
 	 * permanently disabled for the rest of this run — never fails the run. */
 	onRawLine?: (line: string) => void;
+	/** Transcript recording (opt-in): tee every raw stdout line to this file via
+	 * `openTranscriptTee`, headed by a `transcriptHost` header (default `pi`).
+	 * Composes with `onRawLine`; fail-open. */
+	transcriptFile?: string;
+	transcriptHost?: TranscriptHost;
 	/** Bounded host-specific metadata observer. Receives raw stderr chunks before
 	 * the shared 64KB retained-diagnostic cap; exceptions are ignored. */
 	observeStderr?: (data: Buffer) => void;
@@ -582,11 +601,106 @@ export interface RunSubagentProcessOptions<TAcc extends SubagentAccumulator> {
 	stdoutFormat?: "json" | "text";
 }
 
+/** Event-stream format tag written in a transcript's header line; selects the
+ *  parser's host normaliser. */
+export type TranscriptHost = "pi" | "codex" | "claude" | "opencode" | "grok";
+
+export const TRANSCRIPT_MAX_BYTES = 16 * 1024 * 1024;
+
+/**
+ * Tee a child's raw stdout lines into `file` (append), after one
+ * `{"type":"taskflow_transcript","host":<host>,"v":1}` header line written on
+ * open (one per attempt; the parser re-selects the normaliser on each).
+ * Fail-open everywhere: an unwritable path, a full disk or a stream error only
+ * disables writing — a transcript is never worth failing a run over.
+ * The cap (`PI_TASKFLOW_TRANSCRIPT_MAX_BYTES`, default 16 MB) counts the file's
+ * size at open + what we write, so retries appending to the same file stay
+ * bounded; past it one `{"type":"taskflow_truncated"}` marker is written and
+ * writing stops. No rotation.
+ */
+export function openTranscriptTee(
+	file: string,
+	host: TranscriptHost,
+): { onRawLine: (line: string) => void; close: () => void } | undefined {
+	let written = 0;
+	let stream: fs.WriteStream;
+	try {
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		try {
+			written = fs.statSync(file).size;
+		} catch {
+			/* no file yet */
+		}
+		stream = fs.createWriteStream(file, { flags: "a" });
+	} catch {
+		return undefined;
+	}
+	const override = Number(process.env.PI_TASKFLOW_TRANSCRIPT_MAX_BYTES);
+	const maxBytes = Number.isFinite(override) && override > 0 ? override : TRANSCRIPT_MAX_BYTES;
+	let writable = true;
+	stream.on("error", () => {
+		writable = false;
+	});
+	const append = (chunk: string) => {
+		if (!writable) return;
+		written += Buffer.byteLength(chunk);
+		if (written > maxBytes) {
+			writable = false;
+			chunk = '{"type":"taskflow_truncated"}\n';
+		}
+		try {
+			stream.write(chunk);
+		} catch {
+			writable = false;
+		}
+	};
+	append(`${JSON.stringify({ type: "taskflow_transcript", host, v: 1 })}\n`);
+	return {
+		onRawLine: (line) => append(`${line}\n`),
+		close() {
+			writable = false;
+			try {
+				stream.end();
+			} catch {
+				/* ignore */
+			}
+		},
+	};
+}
+
 /** Spawn an isolated subagent process, fold its event stream, and classify the
  *  outcome into a RunResult. The whole tail (fatalError, signal-kill remap,
  *  idle-timeout, abort, isFailed + placeholder + sanitize) is the single source
- *  of truth — every host runner that delegates here gets identical semantics. */
+ *  of truth — every host runner that delegates here gets identical semantics.
+ *  With `transcriptFile` set the raw stream is also teed there. */
 export async function runSubagentProcess<TAcc extends SubagentAccumulator>(
+	opts: RunSubagentProcessOptions<TAcc>,
+): Promise<RunResult> {
+	const tee = opts.transcriptFile ? openTranscriptTee(opts.transcriptFile, opts.transcriptHost ?? "pi") : undefined;
+	if (!tee) return superviseSubagentProcess(opts);
+	const observer = opts.onRawLine;
+	let observerDisabled = false;
+	try {
+		return await superviseSubagentProcess({
+			...opts,
+			// The caller's observer keeps its own throw-once-then-disabled contract
+			// without taking the tee down with it.
+			onRawLine: (line) => {
+				tee.onRawLine(line);
+				if (!observer || observerDisabled) return;
+				try {
+					observer(line);
+				} catch {
+					observerDisabled = true;
+				}
+			},
+		});
+	} finally {
+		tee.close();
+	}
+}
+
+async function superviseSubagentProcess<TAcc extends SubagentAccumulator>(
 	opts: RunSubagentProcessOptions<TAcc>,
 ): Promise<RunResult> {
 	const { agent, task, model, bin, args, cwd, acc, foldLine } = opts;

@@ -424,6 +424,8 @@ export async function runClaudeAgentTask(
 		idleTimeoutMs: opts.idleTimeoutMs,
 		signal: opts.signal,
 		onLive: opts.onLive,
+		transcriptFile: opts.transcriptFile,
+		transcriptHost: "claude",
 		env: claudeChildEnv(),
 		acc: newClaudeAccumulator(model),
 		foldLine: foldClaudeEventLine,

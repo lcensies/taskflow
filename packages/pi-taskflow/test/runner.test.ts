@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	type EventAccumulator,
+	type LiveUpdate,
 	CTX_TOOLS_GUIDANCE,
 	foldEventLine,
 	isFailed,
@@ -926,6 +927,58 @@ test("Pi completion: agent_end with willRetry false is a revocable terminal cand
 	}
 });
 
+// ── streaming live text (task 6.1) ─────────────────────────────────
+
+async function runStreamingFakePi(body: string): Promise<{ updates: LiveUpdate[]; output: string }> {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tf-pi-stream-"));
+	const fakePi = path.join(dir, "fake-pi.mjs");
+	fs.writeFileSync(
+		fakePi,
+		`#!${process.execPath}\n` +
+			`const emit=x=>process.stdout.write(JSON.stringify(x)+"\\n");\n` +
+			`const delta=d=>emit({type:"message_update",assistantMessageEvent:{type:"text_delta",delta:d}});\n` +
+			`const end=t=>{emit({type:"message_end",message:{role:"assistant",content:[{type:"text",text:t}],stopReason:"stop"}});` +
+			`emit({type:"agent_end",willRetry:false}); emit({type:"agent_settled"});};\n` +
+			`emit({type:"agent_start"}); emit({type:"turn_start"}); emit({type:"message_start"});\n` +
+			body,
+	);
+	fs.chmodSync(fakePi, 0o755);
+	const prevBin = process.env.PI_TASKFLOW_PI_BIN;
+	process.env.PI_TASKFLOW_PI_BIN = fakePi;
+	try {
+		const agents: AgentConfig[] = [{ name: "t", description: "t", systemPrompt: "", source: "user", filePath: "" }];
+		const updates: LiveUpdate[] = [];
+		const result = await createPiSubagentRunner({ resourceProfile: "isolated", extensions: [], terminalGraceMs: 30 })
+			.runTask(dir, agents, "t", "stream", { idleTimeoutMs: 10_000, onLive: (l) => updates.push(l) });
+		return { updates, output: result.output };
+	} finally {
+		if (prevBin === undefined) delete process.env.PI_TASKFLOW_PI_BIN;
+		else process.env.PI_TASKFLOW_PI_BIN = prevBin;
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+}
+
+test("streaming: a burst of text_delta events yields one streaming update carrying the whole tail", async () => {
+	const { updates, output } = await runStreamingFakePi(
+		`delta("Hel"); delta("lo "); delta("world");\nsetTimeout(()=>end("Hello world!"), 250);\n`,
+	);
+	assert.deepEqual(
+		updates.map((u) => [u.text, u.streaming === true]),
+		[["Hello world", true], ["Hello world!", false]],
+	);
+	assert.equal(output, "Hello world!");
+});
+
+test("streaming: message_end before the throttle fires publishes only the authoritative text", async () => {
+	const { updates } = await runStreamingFakePi(
+		`delta("Hel"); delta("lo"); end("Hello.");\nsetTimeout(()=>{}, 250);\n`,
+	);
+	assert.deepEqual(
+		updates.map((u) => [u.text, u.streaming === true]),
+		[["Hello.", false]],
+	);
+});
+
 // ── transcript tee (task 2.3) ──────────────────────────────────────
 
 /** The stream is flushed asynchronously after `end()`; give it a moment. */
@@ -938,7 +991,7 @@ async function readWhen(file: string, done: (text: string) => boolean): Promise<
 	return fs.existsSync(file) ? fs.readFileSync(file, "utf-8") : "";
 }
 
-test("runAgentTask: transcriptFile receives the child's stdout lines verbatim", async () => {
+test("runAgentTask: transcriptFile receives a pi header then the child's stdout lines verbatim", async () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tf-transcript-"));
 	const fakePi = path.join(dir, "fake-pi.mjs");
 	fs.writeFileSync(
@@ -962,6 +1015,7 @@ test("runAgentTask: transcriptFile receives the child's stdout lines verbatim", 
 		const text = await readWhen(transcriptFile, (t) => t.includes("agent_end"));
 		const lines = text.split("\n").filter(Boolean);
 		assert.deepEqual(lines, [
+			'{"type":"taskflow_transcript","host":"pi","v":1}',
 			'{"type":"agent_start"}',
 			'{"type":"turn_start"}',
 			'{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"DONE"}],"stopReason":"stop"}}',
@@ -989,7 +1043,8 @@ test("runAgentTask: transcript cap writes one truncation marker and stops", asyn
 	const prevBin = process.env.PI_TASKFLOW_PI_BIN;
 	const prevMax = process.env.PI_TASKFLOW_TRANSCRIPT_MAX_BYTES;
 	process.env.PI_TASKFLOW_PI_BIN = fakePi;
-	process.env.PI_TASKFLOW_TRANSCRIPT_MAX_BYTES = "30"; // smaller than the second line
+	// Header (49 B) + agent_start (23 B) fit; turn_start does not.
+	process.env.PI_TASKFLOW_TRANSCRIPT_MAX_BYTES = "80";
 	const transcriptFile = path.join(dir, "capped.ndjson");
 	try {
 		const agents: AgentConfig[] = [
@@ -1000,7 +1055,8 @@ test("runAgentTask: transcript cap writes one truncation marker and stops", asyn
 		assert.equal(res.output, "DONE");
 		const text = await readWhen(transcriptFile, (t) => t.includes("taskflow_truncated"));
 		const lines = text.split("\n").filter(Boolean);
-		assert.equal(lines[0], '{"type":"agent_start"}');
+		assert.equal(lines[0], '{"type":"taskflow_transcript","host":"pi","v":1}');
+		assert.equal(lines[1], '{"type":"agent_start"}');
 		assert.equal(lines.at(-1), '{"type":"taskflow_truncated"}');
 		assert.equal(lines.filter((l) => l.includes("taskflow_truncated")).length, 1);
 		assert.ok(!text.includes("agent_end"), "writing stops at the cap");

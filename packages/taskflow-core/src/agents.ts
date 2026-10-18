@@ -405,7 +405,7 @@ export function readSubagentSettings(): SubagentSettings {
 }
 
 /**
- * Copy the 18 built-in agents from extensions/agents/*.md into the project's
+ * Copy the built-in agents from extensions/agents/*.md into the project's
  * .pi/agents/ directory so Pi's native subagent tool (and any other extension)
  * can discover them. taskflow's own discoverAgents() already reads from this
  * directory with lower priority than built-in, so the copy is a no-op for

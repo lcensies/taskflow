@@ -293,6 +293,8 @@ export async function runCodexAgentTask(
 		idleTimeoutMs: opts.idleTimeoutMs,
 		signal: opts.signal,
 		onLive: opts.onLive,
+		transcriptFile: opts.transcriptFile,
+		transcriptHost: "codex",
 		acc: newCodexAccumulator(model),
 		foldLine: foldCodexEventLine,
 		requireTerminalEvent: true,

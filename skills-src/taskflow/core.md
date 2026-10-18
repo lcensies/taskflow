@@ -668,6 +668,20 @@ has a `gate` of its own: `fix` + `fix-harness` → [`build`] → [`harness-up` �
 implementation phases' task text is injected into the lenses as the spec
 when no spec files are wired.
 
+`fix-harness` runs `harness-engineer`. With `harnessUp`/`harnessDown` wired
+it only closes `## Unverifiable` gaps from `FINDINGS.md` (additive). Without
+them it **establishes the harness**: greenfield → discovers use cases and
+builds every test layer separately (static, unit, scenario/e2e `up`/`down`/
+`replay` + `Harness` helper + fakes, regression replay, black-box operator
+entry, browser automation when there is a UI, one full-suite command);
+brownfield → wraps the existing runners/CI/`AGENTS.md` into the contract
+without changing existing tests. Both write `tests/harness/README.md` (one
+"we run X this way" section per layer) and an `AGENTS.md` `## Testing`
+section, and the operator receives that report so it can run the fresh
+scripts in the same run. The report ends with `test.command` /
+`test.harness.*` values — set them with `/facts set` so the next flow wires
+`harnessUp`/`harnessDown`/`replay` and skips the bootstrap.
+
 ```jsonc
 // omitted  → canonical tail, defaults (no build script, 2 rounds)
 "verify": { "testCmd": "just check-ci", "specs": ["openspec/changes/x/specs/a/spec.md", "openspec/changes/x/tasks.md"],
@@ -912,6 +926,17 @@ pipeline rather than guessing at an outcome.
     tool results render uncapped and wrapped instead of truncated. The
     footer hint (`^O full` / `^O compact`) shows the mode you'd switch to;
     the toggle persists across leaving and re-entering `detail`.
+    Tool calls whose name is a pi built-in (`bash`, `read`, `write`, `edit`,
+    `grep`, `find`, `ls`) render with pi's own tool renderers (highlighted
+    bash, diffs for edits) and show the tool's duration (`✓ bash · 1.2s`);
+    other tools keep a one-line summary. Thinking shows as a dim `∴ thinking`
+    row.
+  Transcripts exist for **every host** (pi, codex, claude, opencode, grok),
+  not only pi: each node's raw event stream is recorded to
+  `runs/<flow>/<runId>/<node>.ndjson`, starting with a header line
+  `{"type":"taskflow_transcript","host":"<host>","v":1}` that tells the reader
+  which host's event format to normalise (a file without a header is read as
+  pi). `PI_TASKFLOW_TRANSCRIPT_MAX_BYTES` caps the file for all hosts.
   Key map (same at every list level): `↑/k` `↓/j` move, `PgUp/ctrl+u`
   `PgDn/ctrl+d` page, `Home/g` top, `End/G` bottom, `Enter/→/l` opens the next
   level (or scrolls, inside `detail`), `Esc/←/h` pops back a level, `q/ctrl+c`
@@ -926,6 +951,17 @@ pipeline rather than guessing at an outcome.
   differently from a genuinely running one: `⚠ orphaned` (no current-stage
   marker — nothing is actually running) or `⟲ unrecorded` (adopted from its
   outcome record). Both are distinct from the plain `◐` running badge.
+- **Expand the run in chat (`Ctrl+O`).** Pi's global tool-output toggle on
+  the `taskflow` tool result switches it from the compact phase grid to the
+  expanded run view: for each phase in order, its status row, a **tail of its
+  transcript** (last 12 entries, with pi-native tool rows and durations), and
+  — for finished non-final phases — the phase's own output as Markdown under
+  `─ output ─`; the final result stays last under `─── Result ───`. A fan-out
+  phase shows its first 6 items (last 4 entries each) then `… +N items`.
+  While a phase streams, the assistant text appears as it is produced, not
+  per turn (in memory only; never persisted per delta). A phase with no
+  transcript file falls back to its recorded activity lines. The collapsed
+  view is unchanged; the inspector above remains the full scrollable view.
 - **Watch a worker live (opt-in tmux window).** Set `taskflow.workerWindows:
   true` in `settings.json` (or `workerWindow: true` on one phase, which
   overrides the setting either way) to have each node that spawns a subagent

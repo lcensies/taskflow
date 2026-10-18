@@ -7,8 +7,22 @@
 
 import { getMarkdownTheme, type Theme } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, Spacer, Text, truncateToWidth, type Component } from "@earendil-works/pi-tui";
-import { aggregateUsage, dependenciesOf, emptyUsage, formatTokens, type Phase, topoLayers, type UsageStats } from "taskflow-core";
+import {
+	aggregateUsage,
+	dependenciesOf,
+	emptyUsage,
+	finalPhase,
+	formatTokens,
+	type Phase,
+	runsDir,
+	topoLayers,
+	type TranscriptEntry,
+	transcriptDirFor,
+	transcriptFileFor,
+	type UsageStats,
+} from "taskflow-core";
 import type { PhaseState, RunState } from "taskflow-core";
+import { renderTranscript, TranscriptTail } from "./transcript-view.ts";
 
 // Single-width glyphs (Geometric Shapes / check marks) — keep columns aligned.
 const ICON: Record<PhaseState["status"], { ch: string; color: string }> = {
@@ -522,21 +536,115 @@ export function renderFingerprint(state: RunState): string {
 	return `${state.status}#${phaseParts}#${tick()}`;
 }
 
-/** Recent activity per running phase (expanded view of an in-flight run). */
-export function renderRunningActivity(state: RunState, theme: Theme, perPhase = 6): string {
-	const blocks: string[] = [];
+/** Transcript entries shown per single-agent phase / per fan-out item in the expanded result. */
+const TAIL_ENTRIES = 12;
+const ITEM_TAIL_ENTRIES = 4;
+const MAX_ITEMS = 6;
+
+/**
+ * Per-node transcript tails of one run. A node is polled (incrementally) while
+ * the run is running, then once more after it finished, then never again.
+ */
+class TranscriptSet {
+	private readonly tails = new Map<string, TranscriptTail | undefined>();
+	private readonly settled = new Set<string>();
+	private readonly dir: string;
+	constructor(dir: string) {
+		this.dir = dir;
+	}
+	entries(nodeId: string, live: boolean): TranscriptEntry[] {
+		if (!this.tails.has(nodeId)) {
+			let tail: TranscriptTail | undefined;
+			try {
+				tail = new TranscriptTail(transcriptFileFor(this.dir, nodeId));
+			} catch {
+				tail = undefined; // unsafe node id: no transcript
+			}
+			this.tails.set(nodeId, tail);
+		}
+		const tail = this.tails.get(nodeId);
+		if (!tail || this.settled.has(nodeId)) return tail?.entries ?? [];
+		tail.poll();
+		if (!live) this.settled.add(nodeId);
+		return tail.entries;
+	}
+}
+
+/** pi rebuilds the result component on every update of a running run, always
+ * with the same `RunState` object; keying on it keeps the read offsets. */
+const transcriptSets = new WeakMap<RunState, TranscriptSet>();
+
+/** Section heading for one phase: status, label, type, role/model/cost and tokens. */
+function phaseHeading(phase: Phase, ps: PhaseState | undefined, theme: Theme, planned?: string): string {
+	const status = ps?.status ?? "pending";
+	const usage = formatUsage(ps?.usage);
+	return (
+		`${icon(status, theme)} ${theme.bold(theme.fg("text", phase.label ?? phase.id))}  ` +
+		theme.fg("dim", phase.type ?? "agent") +
+		`  ${phaseDetail(phase, ps, theme, planned)}` +
+		(usage ? theme.fg("dim", `  ${usage}`) : "")
+	);
+}
+
+/**
+ * Expanded body of the result card: per phase in definition order, its
+ * heading, the tail of its transcript (or its `liveLog` when it has none) and,
+ * for a `done` non-final phase, its output. The final phase's output is the
+ * caller's `─── Result ───` block.
+ */
+function renderPhaseSections(
+	state: RunState,
+	theme: Theme,
+	width: number,
+	transcripts: TranscriptSet,
+	plannedModel?: (phase: Phase) => string | undefined,
+): string[] {
+	const live = state.status === "running";
+	const finalId = state.def.phases.length ? finalPhase(state.def.phases).id : undefined;
+	const inner = Math.max(1, width - 2);
+	const out: string[] = [];
+	const indent = (lines: string[]) => {
+		for (const l of lines) out.push(`  ${l}`);
+	};
+	const tail = (entries: TranscriptEntry[], n: number) =>
+		renderTranscript(entries.slice(-n), inner, theme, { expanded: true, cwd: state.cwd });
+
 	for (const phase of state.def.phases) {
 		const ps = state.phases[phase.id];
-		if (ps?.status !== "running") continue;
-		const log = (ps.liveLog ?? []).slice(-perPhase);
-		if (log.length === 0) continue;
-		blocks.push(
-			`  ${theme.fg("accent", phase.id)}\n` +
-				log.map((l) => `    ${theme.fg("dim", "› ")}${theme.fg("muted", l.length > 100 ? `${l.slice(0, 100)}…` : l)}`).join("\n"),
-		);
+		out.push("");
+		out.push(phaseHeading(phase, ps, theme, plannedModel?.(phase)));
+		let shown = false;
+		const type = phase.type ?? "agent";
+		if ((type === "map" || type === "parallel") && ps?.subProgress) {
+			const total = ps.subProgress.total;
+			for (let i = 0; i < Math.min(total, MAX_ITEMS); i++) {
+				const item = ps.items?.[i];
+				const label = `[${i + 1}]${item?.agent ? ` ${item.agent}` : ""}`;
+				out.push(`  ${icon(item?.status ?? "pending", theme)} ${theme.fg("accent", label)}`);
+				const entries = transcripts.entries(`${phase.id}-${i}`, live);
+				if (entries.length) {
+					indent(tail(entries, ITEM_TAIL_ENTRIES));
+					shown = true;
+				}
+			}
+			if (total > MAX_ITEMS) out.push(theme.fg("dim", `  … +${total - MAX_ITEMS} items`));
+		} else {
+			const entries = transcripts.entries(phase.id, live);
+			if (entries.length) {
+				indent(tail(entries, TAIL_ENTRIES));
+				shown = true;
+			}
+		}
+		if (!shown && ps?.liveLog?.length) {
+			out.push(theme.fg("muted", "  ─ recorded activity ─"));
+			for (const l of ps.liveLog) out.push(`  ${theme.fg("dim", "› ")}${theme.fg("muted", l)}`);
+		}
+		if (ps?.status === "done" && phase.id !== finalId && ps.output?.trim()) {
+			out.push(theme.fg("muted", "  ─ output ─"));
+			indent(new Markdown(ps.output.trim(), 0, 0, getMarkdownTheme()).render(inner));
+		}
 	}
-	if (blocks.length === 0) return "";
-	return `${theme.fg("muted", "─── Activity ───")}\n${blocks.join("\n")}`;
+	return out.map((l) => truncateToWidth(l, width));
 }
 
 /**
@@ -553,7 +661,7 @@ class Lines implements Component {
 	render(width: number): string[] {
 		return this.fn(width).split("\n");
 	}
-	/** No-op — nothing cached, `fn` recomputes from `state` every render. */
+	/** No-op — `fn` recomputes from `state` every render. */
 	invalidate(): void {}
 }
 
@@ -575,13 +683,12 @@ export function renderRunResult(
 	const mdTheme = getMarkdownTheme();
 	const container = new Container();
 	container.addChild(progress);
-	// While the run is in flight there is no result yet — show what the running
-	// phases have been doing instead of an empty block.
-	const activity = renderRunningActivity(state, theme);
-	if (activity) {
-		container.addChild(new Spacer(1));
-		container.addChild(new Text(activity, 0, 0));
+	let transcripts = transcriptSets.get(state);
+	if (!transcripts) {
+		transcripts = new TranscriptSet(transcriptDirFor(runsDir(state.cwd), state.flowName, state.runId));
+		transcriptSets.set(state, transcripts);
 	}
+	container.addChild(new Lines((width) => renderPhaseSections(state, theme, width, transcripts, plannedModel).join("\n")));
 	container.addChild(new Spacer(1));
 	container.addChild(new Text(theme.fg("muted", "─── Result ───"), 0, 0));
 	if (finalOutput.trim()) {

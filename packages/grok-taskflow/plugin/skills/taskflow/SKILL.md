@@ -674,6 +674,20 @@ has a `gate` of its own: `fix` + `fix-harness` → [`build`] → [`harness-up` �
 implementation phases' task text is injected into the lenses as the spec
 when no spec files are wired.
 
+`fix-harness` runs `harness-engineer`. With `harnessUp`/`harnessDown` wired
+it only closes `## Unverifiable` gaps from `FINDINGS.md` (additive). Without
+them it **establishes the harness**: greenfield → discovers use cases and
+builds every test layer separately (static, unit, scenario/e2e `up`/`down`/
+`replay` + `Harness` helper + fakes, regression replay, black-box operator
+entry, browser automation when there is a UI, one full-suite command);
+brownfield → wraps the existing runners/CI/`AGENTS.md` into the contract
+without changing existing tests. Both write `tests/harness/README.md` (one
+"we run X this way" section per layer) and an `AGENTS.md` `## Testing`
+section, and the operator receives that report so it can run the fresh
+scripts in the same run. The report ends with `test.command` /
+`test.harness.*` values — set them with `/facts set` so the next flow wires
+`harnessUp`/`harnessDown`/`replay` and skips the bootstrap.
+
 ```jsonc
 // omitted  → canonical tail, defaults (no build script, 2 rounds)
 "verify": { "testCmd": "just check-ci", "specs": ["openspec/changes/x/specs/a/spec.md", "openspec/changes/x/tasks.md"],

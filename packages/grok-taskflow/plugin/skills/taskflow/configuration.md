@@ -468,6 +468,7 @@ Each entry is one of:
 |----------|--------|
 | `PI_TASKFLOW_PI_BIN` | Override the `pi` binary used to spawn subagents. Used by tests and unusual launch setups (e.g. `PI_TASKFLOW_PI_BIN=pi`). Normally auto-detected. |
 | `PI_TASKFLOW_CODEX_BIN` | Override the `codex` binary used to spawn Codex subagents. |
+| `PI_TASKFLOW_TRANSCRIPT_MAX_BYTES` | Per-node cap on the recorded transcript file (`runs/<flow>/<runId>/<node>.ndjson`), default 16 MB. Host-wide: applies to the pi, codex, claude, opencode and grok runners alike (it was pi-only). Past the cap a `{"type":"taskflow_truncated"}` marker is written and recording stops; the run is unaffected. |
 | `PI_TASKFLOW_CHILD_ENV_ALLOW` | Comma-separated names of extra task-specific environment variables to pass intentionally to Codex/OpenCode/Grok children. Unlisted application secrets are removed. |
 | `PI_TASKFLOW_CLAUDE_BIN` | Override the `claude` binary used to spawn Claude Code subagents. |
 | `PI_TASKFLOW_CLAUDE_UNSAFE_BYPASS=1` | Explicitly allow trusted Claude phases requesting known mutating tools to use narrow `--tools` + `bypassPermissions`; unknown names always fail closed. |

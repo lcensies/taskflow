@@ -13,6 +13,7 @@ import {
 	newAccumulator,
 	foldEventLine,
 	runSubagentProcess,
+	stripControlSequences,
 	unknownAgentResult,
 	normalizePiChildSettings,
 	readSteerMessages,
@@ -20,6 +21,7 @@ import {
 	type AgentConfig,
 	type CompletionPolicy,
 	type EventAccumulator,
+	type LiveUpdate,
 	type PiChildSettings,
 	type RunOptions,
 	type RunResult,
@@ -230,86 +232,33 @@ export function ctxExtensionPath(): string | undefined {
 	return undefined;
 }
 
-const TRANSCRIPT_MAX_BYTES = 16 * 1024 * 1024;
-
 /**
- * Tee the child's raw stdout lines into `file` (append). Fail-open everywhere:
- * an unwritable path, a full disk or a stream error only disables writing — a
- * transcript is never worth failing a run over.
- * ponytail: the cap counts the file's size at open + what we write, so retries
- * appending to the same file stay bounded; no rotation.
+ * First output is the moment a node becomes worth watching: open its tmux
+ * viewer window on the first raw line (opt-in, idempotent, capped, fail-open —
+ * see tmux-viewer.ts). `warning` is set when the window could not be opened;
+ * the caller turns it into a phase `warnings` entry and changes nothing else.
  */
-function openTranscriptTee(
-	file: string,
-	windowOverride?: boolean,
-): { onRawLine: (line: string) => void; close: () => void; warning?: string } | undefined {
-	let written = 0;
-	let stream: fs.WriteStream;
-	try {
-		fs.mkdirSync(path.dirname(file), { recursive: true });
-		try {
-			written = fs.statSync(file).size;
-		} catch {
-			/* no file yet */
-		}
-		stream = fs.createWriteStream(file, { flags: "a" });
-	} catch {
-		return undefined;
-	}
-	const override = Number(process.env.PI_TASKFLOW_TRANSCRIPT_MAX_BYTES);
-	const maxBytes = Number.isFinite(override) && override > 0 ? override : TRANSCRIPT_MAX_BYTES;
-	let writable = true;
-	stream.on("error", () => {
-		writable = false;
-	});
-	const write = (chunk: string) => {
-		try {
-			stream.write(chunk);
-		} catch {
-			writable = false;
-		}
-	};
-	let windowTried = false;
-	const tee = {
-		/** Set when this node's viewer window could not be opened — the caller turns
-		 *  it into a phase `warnings` entry and changes nothing else. */
+function workerWindowOpener(file: string, enabled?: boolean): { onRawLine: () => void; warning?: string } {
+	let tried = false;
+	const opener = {
 		warning: undefined as string | undefined,
-		onRawLine(line: string) {
-			// First output is the moment this node becomes worth watching: open its
-			// tmux viewer window (opt-in, idempotent, capped, fail-open — see
-			// tmux-viewer.ts).
-			if (!windowTried) {
-				windowTried = true;
-				if (openWorkerWindowForTranscript(file, { enabled: windowOverride }) === "unavailable") {
-					tee.warning = WORKER_WINDOW_UNAVAILABLE_WARNING;
-				}
-			}
-			if (!writable) return;
-			const chunk = `${line}\n`;
-			written += Buffer.byteLength(chunk);
-			if (written > maxBytes) {
-				write('{"type":"taskflow_truncated"}\n');
-				writable = false;
-				return;
-			}
-			write(chunk);
-		},
-		close() {
-			writable = false;
-			try {
-				stream.end();
-			} catch {
-				/* ignore */
+		onRawLine() {
+			if (tried) return;
+			tried = true;
+			if (openWorkerWindowForTranscript(file, { enabled }) === "unavailable") {
+				opener.warning = WORKER_WINDOW_UNAVAILABLE_WARNING;
 			}
 		},
 	};
-	return tee;
+	return opener;
 }
 
 interface PiEventAccumulator extends EventAccumulator {
 	generation: number;
 	finalGeneration?: number;
 	terminalGeneration?: number;
+	/** Assistant text streamed so far in the current message (bounded tail). */
+	streamText?: string;
 }
 
 function newPiAccumulator(model?: string): PiEventAccumulator {
@@ -358,7 +307,16 @@ function foldPiEventLine(acc: PiEventAccumulator, line: string) {
 	}
 
 	const live = foldEventLine(acc, line);
+	if (type === "message_start") {
+		acc.streamText = undefined;
+	} else if (type === "message_update") {
+		const update = event.assistantMessageEvent as { type?: unknown; delta?: unknown } | undefined;
+		if (update?.type === "text_delta" && typeof update.delta === "string") {
+			acc.streamText = ((acc.streamText ?? "") + update.delta).slice(-STREAM_KEEP_CHARS);
+		}
+	}
 	if (type === "message_end") {
+		acc.streamText = undefined;
 		const message = event.message as Record<string, unknown> | undefined;
 		if (message?.role === "assistant") {
 			const reason = typeof message.stopReason === "string" ? message.stopReason : undefined;
@@ -393,6 +351,46 @@ function foldPiEventLine(acc: PiEventAccumulator, line: string) {
 		acc.terminalGeneration = acc.generation;
 	}
 	return live;
+}
+
+/** Streamed assistant text is published at most this often (the render heartbeat). */
+const LIVE_STREAM_MS = 120;
+const STREAM_TAIL_CHARS = 200;
+/** Kept raw so control sequences split across deltas still strip cleanly. */
+const STREAM_KEEP_CHARS = 4 * STREAM_TAIL_CHARS;
+
+/**
+ * The pi fold plus a trailing throttle for streamed text: the first delta of a
+ * burst arms one timer that publishes the tail accumulated by then, so a burst
+ * lands whole in a single `streaming` update and updates are at most one per
+ * LIVE_STREAM_MS. `message_end` clears the buffer, so a pending tick after it
+ * publishes nothing and the turn's authoritative update stands.
+ */
+function streamingPiFold(onLive: ((live: LiveUpdate) => void) | undefined) {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	return {
+		foldLine(acc: PiEventAccumulator, line: string): LiveUpdate | null {
+			const live = foldPiEventLine(acc, line);
+			if (onLive && acc.streamText && !timer) {
+				timer = setTimeout(() => {
+					timer = undefined;
+					const text = stripControlSequences(acc.streamText ?? "").slice(-STREAM_TAIL_CHARS).trim();
+					if (!text) return;
+					try {
+						onLive({ text, usage: { ...acc.usage }, model: acc.model, streaming: true });
+					} catch {
+						/* user callback must not sink the run */
+					}
+				}, LIVE_STREAM_MS);
+				(timer as { unref?: () => void }).unref?.();
+			}
+			return live;
+		},
+		stop(): void {
+			clearTimeout(timer);
+			timer = undefined;
+		},
+	};
 }
 
 function piCompletionPolicy(terminalGraceMs: number): CompletionPolicy<PiEventAccumulator> {
@@ -524,7 +522,8 @@ export async function runAgentTask(
 	let tmpPromptPath: string | null = null;
 
 	const acc = newPiAccumulator(model);
-	const transcript = opts.transcriptFile ? openTranscriptTee(opts.transcriptFile, opts.workerWindow) : undefined;
+	const stream = streamingPiFold(opts.onLive);
+	const viewer = opts.transcriptFile ? workerWindowOpener(opts.transcriptFile, opts.workerWindow) : undefined;
 
 	try {
 		const ctxEnabled = Boolean(opts.ctxDir && opts.nodeId);
@@ -597,9 +596,11 @@ export async function runAgentTask(
 			idleTimeoutMs: opts.idleTimeoutMs,
 			signal: opts.signal,
 			onLive: opts.onLive,
-			onRawLine: transcript?.onRawLine,
+			onRawLine: viewer?.onRawLine,
+			transcriptFile: opts.transcriptFile,
+			transcriptHost: "pi",
 			acc,
-			foldLine: foldPiEventLine,
+			foldLine: stream.foldLine,
 			completionPolicy: piCompletionPolicy(piChild.terminalGraceMs),
 			canDiscardOversizedLine: canDiscardOversizedPiAgentEnd,
 			onTerminalCommit: opts.onTerminalCommit,
@@ -613,10 +614,10 @@ export async function runAgentTask(
 		}
 		// A viewer window that never opened is a diagnostic, not a failure: it rides
 		// out as a warning and nothing else about the result changes.
-		if (transcript?.warning) result.warnings = [...(result.warnings ?? []), transcript.warning];
+		if (viewer?.warning) result.warnings = [...(result.warnings ?? []), viewer.warning];
 		return result;
 	} finally {
-		transcript?.close();
+		stream.stop();
 		if (tmpPromptPath) {
 			try {
 				fs.unlinkSync(tmpPromptPath);

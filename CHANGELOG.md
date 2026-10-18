@@ -10,6 +10,8 @@ All notable changes to taskflow are documented here. This project follows [Keep 
 - **Model shown for every phase.** Phase rows now show the model a phase *will* run on (`~model`, resolved from the phase or its agent) before it starts, and the actual model once it has.
 - **Back-edges rendered.** A `loop` phase shows `↻ self×N` and a gate with `onBlock: "retry"` shows `↺ retry → <deps>`, so a flow that can return to an earlier stage no longer reads as a straight pipeline.
 - **Current-stage marker.** Every running phase row carries `▸`, and the navigator opens its cursor on a running phase.
+- **Rich transcript view.** `Ctrl+O` on the `taskflow` tool result now expands each phase into a transcript tail (last 12 entries, 4 per fan-out item, first 6 items) with pi-native tool rows (diffs, highlighted bash) and tool durations, plus each finished phase's own output; collapsed mode is unchanged and phases without a transcript fall back to recorded activity. Assistant text streams into running rows between turns (in memory only).
+- **Transcripts for every host.** codex, claude, opencode and grok subagents now record `runs/<flow>/<runId>/<node>.ndjson` like pi, led by a `{"type":"taskflow_transcript","host":…,"v":1}` header that selects the per-host normaliser. `PI_TASKFLOW_TRANSCRIPT_MAX_BYTES` now applies to all hosts. The parser also carries thinking, tool duration/error and tool details; the inspector and `peek --transcript` render them.
 
 ### Fixed
 

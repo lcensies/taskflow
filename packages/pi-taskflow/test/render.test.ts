@@ -1,10 +1,20 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { initTheme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { formatCost, formatUsage, renderFingerprint, renderProgress, renderRunResult, renderRunningActivity, summarizeRun } from "../src/render.ts";
-import { emptyUsage } from "taskflow-core";
+import * as fs from "node:fs";
+import fsModule from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+import * as os from "node:os";
+import * as path from "node:path";
+import { mock } from "node:test";
+import { formatCost, formatUsage, renderFingerprint, renderProgress, renderRunResult, summarizeRun } from "../src/render.ts";
+import { emptyUsage, runsDir, transcriptDirFor, transcriptFileFor } from "taskflow-core";
 import type { Taskflow } from "taskflow-core";
 import type { PhaseState, RunState } from "taskflow-core";
+
+// Markdown output blocks style through pi's global theme.
+initTheme("dark");
 
 /** Identity theme — strips styling so assertions see plain structure. */
 const theme: any = { fg: (_c: string, s: string) => s, bold: (s: string) => s };
@@ -182,29 +192,6 @@ test("renderProgress: never shows negative elapsed for a running phase with stal
 	assert.ok(!/-\d+s/.test(out), `output must not contain a negative elapsed time:\n${out}`);
 });
 
-test("renderRunningActivity: only running phases, most recent lines, empty when idle", () => {
-	const def: Taskflow = {
-		name: "x",
-		phases: [
-			{ id: "a", type: "agent", task: "t" },
-			{ id: "b", type: "agent", task: "t", final: true },
-		],
-	};
-	const state = mkState(def, {
-		a: { id: "a", status: "running", liveLog: ["one", "two", "three"] },
-		b: { id: "b", status: "done", liveLog: ["finished work"], usage: emptyUsage() },
-	});
-	const out = renderRunningActivity(state, theme, 2);
-	assert.match(out, /Activity/);
-	assert.match(out, /two/);
-	assert.match(out, /three/);
-	assert.doesNotMatch(out, /one\b/, "older lines beyond the per-phase cap are dropped");
-	assert.doesNotMatch(out, /finished work/, "a finished phase is not live activity");
-
-	const idle = mkState(def, { a: done("a"), b: done("b") }, "completed");
-	assert.equal(renderRunningActivity(idle, theme), "", "nothing running → no activity block");
-});
-
 test("renderProgress: every line stays within a given width even with a 12-dep phase and long liveText", () => {
 	const deps = Array.from({ length: 12 }, (_, i) => `d${i}`);
 	const def: Taskflow = {
@@ -372,6 +359,16 @@ test("renderFingerprint: stable for an unchanged state within the same second", 
 	assert.equal(renderFingerprint(state), renderFingerprint(state));
 });
 
+test("renderFingerprint: a streamed tick with an unchanged tail does not change it; a new tail does", () => {
+	const def: Taskflow = { name: "x", phases: [{ id: "p", type: "agent", task: "t", final: true }] };
+	const state = mkState(def, { p: { id: "p", status: "running", liveText: "Hello world" } });
+	const before = renderFingerprint(state);
+	state.phases.p.liveText = "Hello world";
+	assert.equal(renderFingerprint(state), before);
+	state.phases.p.liveText = "Hello world, again";
+	assert.notEqual(renderFingerprint(state), before);
+});
+
 // --- back-edges, current-stage marker, planned model -----------------------
 
 const loopy: Taskflow = {
@@ -429,4 +426,251 @@ test("renderProgress: pending rows show the planned model, started rows the actu
 	assert.match(lines.find((l) => l.includes("polish"))!, /（~gpt-5）/);
 	// No resolver result for `check` — show nothing rather than a wrong model.
 	assert.doesNotMatch(lines.find((l) => l.includes("check"))!, /（/);
+});
+
+// --- collapsed snapshot (taken before the expanded transcript view landed) ---
+
+function snapshotState(): RunState {
+	const usage = { ...emptyUsage(), input: 1200, output: 300, cost: 0.02 };
+	const def: Taskflow = {
+		name: "three",
+		phases: [
+			{ id: "a", type: "agent", task: "t" },
+			{ id: "b", type: "agent", task: "t", dependsOn: ["a"] },
+			{ id: "c", type: "agent", task: "t", dependsOn: ["b"], final: true },
+			{ id: "m", type: "map", over: "x", task: "t", dependsOn: ["a"] } as Taskflow["phases"][number],
+		],
+	};
+	return mkState(def, {
+		a: { id: "a", status: "done", usage, startedAt: 1000, endedAt: 4000, model: "anthropic/claude-x", output: "A out" },
+		b: { id: "b", status: "running", usage, startedAt: 4000, liveText: "working", liveLog: ["l1"] },
+		m: { id: "m", status: "running", usage, startedAt: 4000, subProgress: { done: 3, total: 8, running: 2, failed: 1 } },
+	});
+}
+
+test("renderRunResult: collapsed output is byte-identical to the pre-change snapshot", () => {
+	const now = Date.now;
+	try {
+		Date.now = () => 20_000;
+		const state = snapshotState();
+		assert.deepEqual(renderRunResult(state, "", theme, false).render(80), [
+			"▸ taskflow three  1/4 · 2▸",
+			"    ✓ a   agent  agent（claude-x）  $0.02  3s",
+			"  ┌▸◐ b   agent  agent",
+			"  └▸◐ m   map    ━━━───── 3/8 · 2 run · 1✗  map",
+			"    ○ c   agent  agent",
+			"  Ctrl+O to expand",
+			"  ⠋ · $0.06 · 4.5k tok · 19s · › working",
+		]);
+		assert.deepEqual(renderRunResult(state, "", theme, false).render(30), [
+			"▸ taskflow three  1/4 · 2▸",
+			"    ✓ a   agent  agent（cla\u001b[0m...\u001b[0m",
+			"  ┌▸◐ b   agent  agent",
+			"  └▸◐ m   map    ━━━───── 3\u001b[0m...\u001b[0m",
+			"    ○ c   agent  agent",
+			"  Ctrl+O to expand",
+			"  ⠋ · $0.06 · 4.5k tok · 19\u001b[0m...\u001b[0m",
+		]);
+		const usage = state.phases.a.usage;
+		state.status = "completed";
+		state.phases.b = { id: "b", status: "done", usage, startedAt: 4000, endedAt: 9000, output: "B" };
+		state.phases.m = { id: "m", status: "done", usage, startedAt: 4000, endedAt: 9000, subProgress: { done: 8, total: 8, running: 0, failed: 0 } };
+		state.phases.c = { id: "c", status: "done", usage, startedAt: 9000, endedAt: 12000, output: "C" };
+		assert.deepEqual(renderRunResult(state, "C final", theme, false).render(80), [
+			"✓ taskflow three  4/4",
+			"    ✓ a   agent  agent（claude-x）  $0.02  3s",
+			"  ┌ ✓ b   agent  agent  $0.02  5s",
+			"  └ ✓ m   map    8✓  $0.02  5s",
+			"    ✓ c   agent  agent  $0.02  3s",
+			"  Ctrl+O to expand",
+			"  · · $0.08 · 6.0k tok · 11s",
+		]);
+	} finally {
+		Date.now = now;
+	}
+});
+
+// --- expanded (Ctrl+O) per-phase transcript view ---------------------------
+
+const textLine = (text: string) =>
+	JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } });
+
+/** A temp cwd whose run `r` of flow `def.name` has the given node transcripts. */
+function withTranscripts(def: Taskflow, files: Record<string, string[]>): { cwd: string; cleanup: () => void } {
+	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "tf-render-"));
+	const dir = transcriptDirFor(runsDir(cwd), def.name, "r");
+	fs.mkdirSync(dir, { recursive: true });
+	for (const [nodeId, lines] of Object.entries(files)) fs.writeFileSync(transcriptFileFor(dir, nodeId), `${lines.join("\n")}\n`);
+	return { cwd, cleanup: () => fs.rmSync(cwd, { recursive: true, force: true }) };
+}
+
+const chain3: Taskflow = {
+	name: "chain3",
+	phases: [
+		{ id: "a", type: "agent", task: "t" },
+		{ id: "b", type: "agent", task: "t", dependsOn: ["a"] },
+		{ id: "c", type: "agent", task: "t", dependsOn: ["b"], final: true },
+	],
+};
+
+function finished3(cwd: string): RunState {
+	const state = mkState(
+		chain3,
+		{
+			a: { ...done("a"), output: "A-OUTPUT" },
+			b: { ...done("b"), output: "B-OUTPUT" },
+			c: { ...done("c"), output: "C-OUTPUT" },
+		},
+		"completed",
+	);
+	state.cwd = cwd;
+	return state;
+}
+
+test("renderRunResult expanded: per-phase headings, transcript tails, non-final outputs, final output once", () => {
+	const { cwd, cleanup } = withTranscripts(chain3, {
+		a: [textLine("said-by-a")],
+		b: [textLine("said-by-b")],
+		c: [textLine("said-by-c")],
+	});
+	try {
+		const lines = renderRunResult(finished3(cwd), "C-OUTPUT", theme, true).render(100);
+		const at = (pred: (l: string) => boolean) => lines.findIndex(pred);
+		const heading = (id: string) => at((l) => l.startsWith(`✓ ${id}  agent`));
+		const [ha, hb, hc, result] = [heading("a"), heading("b"), heading("c"), at((l) => l.includes("─── Result ───"))];
+		assert.ok(ha >= 0 && ha < hb && hb < hc && hc < result, `headings out of order:\n${lines.join("\n")}`);
+		for (const [id, from, to] of [["a", ha, hb], ["b", hb, hc], ["c", hc, result]] as const) {
+			const section = lines.slice(from, to).join("\n");
+			assert.match(section, new RegExp(`said-by-${id}`), `${id} transcript row`);
+		}
+		assert.match(lines.slice(ha, hb).join("\n"), /─ output ─[\s\S]*A-OUTPUT/);
+		assert.match(lines.slice(hb, hc).join("\n"), /─ output ─[\s\S]*B-OUTPUT/);
+		assert.doesNotMatch(lines.slice(hc, result).join("\n"), /─ output ─/);
+		assert.equal(lines.filter((l) => l.includes("C-OUTPUT")).length, 1, "final output appears once");
+		assert.ok(at((l) => l.includes("C-OUTPUT")) > result, "final output sits under ─── Result ───");
+	} finally {
+		cleanup();
+	}
+});
+
+test("renderRunResult expanded: a phase without a transcript shows its liveLog as recorded activity", () => {
+	const { cwd, cleanup } = withTranscripts(chain3, { a: [textLine("said-by-a")] });
+	try {
+		const state = finished3(cwd);
+		state.phases.b.liveLog = ["read src/x.ts", "ran tests"];
+		const out = renderRunResult(state, "C-OUTPUT", theme, true).render(100).join("\n");
+		assert.match(out, /─ recorded activity ─\n\s+› read src\/x\.ts\n\s+› ran tests/);
+		assert.equal(out.match(/recorded activity/g)?.length, 1, "only the phase with a liveLog and no transcript");
+	} finally {
+		cleanup();
+	}
+});
+
+test("renderRunResult expanded: fan-out shows 6 items with ≤4 entries each, then one fold row", () => {
+	const def: Taskflow = { name: "fan", phases: [{ id: "m", type: "map", over: "x", task: "t", final: true } as Taskflow["phases"][number]] };
+	const files: Record<string, string[]> = {};
+	for (let i = 0; i < 8; i++) files[`m-${i}`] = Array.from({ length: 6 }, (_, k) => textLine(`item${i}-entry${k}`));
+	const { cwd, cleanup } = withTranscripts(def, files);
+	try {
+		const state = mkState(def, { m: { ...done("m"), subProgress: { done: 8, total: 8, running: 0, failed: 0 } } }, "completed");
+		state.cwd = cwd;
+		const out = renderRunResult(state, "", theme, true).render(100).join("\n");
+		for (let i = 0; i < 6; i++) {
+			assert.match(out, new RegExp(`\\[${i + 1}\\]`));
+			for (let k = 0; k < 6; k++) {
+				const shown = new RegExp(`item${i}-entry${k}\\b`).test(out);
+				assert.equal(shown, k >= 2, `item ${i} entry ${k} shown=${shown}`);
+			}
+		}
+		assert.doesNotMatch(out, /item[67]-entry/);
+		assert.equal(out.match(/… \+2 items/g)?.length, 1);
+	} finally {
+		cleanup();
+	}
+});
+
+test("renderRunResult expanded: every row fits a 50-column width", () => {
+	const long = "z".repeat(300);
+	const { cwd, cleanup } = withTranscripts(chain3, {
+		a: [
+			JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "toolCall", id: "t1", name: "bash", arguments: { command: `echo ${long}` } }] } }),
+			JSON.stringify({ type: "message_end", message: { role: "toolResult", toolName: "bash", toolCallId: "t1", content: [{ type: "text", text: long }] } }),
+			JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "toolCall", id: "t2", name: "taskflow_peek", arguments: { q: long } }] } }),
+			JSON.stringify({ type: "message_end", message: { role: "toolResult", toolName: "taskflow_peek", toolCallId: "t2", content: [{ type: "text", text: long }] } }),
+		],
+	});
+	try {
+		const state = finished3(cwd);
+		state.phases.a.output = long;
+		state.phases.b.liveLog = [long];
+		const lines = renderRunResult(state, long, theme, true).render(50);
+		for (const line of lines) assert.ok(visibleWidth(line) <= 50, `row exceeds 50 cols (${visibleWidth(line)}): ${line}`);
+	} finally {
+		cleanup();
+	}
+});
+
+test("renderRunResult expanded: a finished run's transcripts are opened at most once per component", () => {
+	const { cwd, cleanup } = withTranscripts(chain3, { a: [textLine("said-by-a")] });
+	const open = mock.method(fsModule, "openSync");
+	const stat = mock.method(fsModule, "statSync");
+	syncBuiltinESMExports();
+	try {
+		const component = renderRunResult(finished3(cwd), "C-OUTPUT", theme, true);
+		const onA = (calls: { arguments: unknown[] }[]) => calls.filter((c) => String(c.arguments[0]).endsWith("a.ndjson")).length;
+		const transcriptOpens = () => onA(open.mock.calls);
+		assert.match(component.render(100).join("\n"), /said-by-a/);
+		assert.equal(transcriptOpens(), 1);
+		assert.match(component.render(100).join("\n"), /said-by-a/);
+		assert.equal(transcriptOpens(), 1, "second render re-uses the parsed entries");
+		assert.equal(onA(stat.mock.calls), 1, "a finished run is not polled again");
+	} finally {
+		open.mock.restore();
+		stat.mock.restore();
+		syncBuiltinESMExports();
+		cleanup();
+	}
+});
+
+test("renderRunResult expanded: a rebuilt component for the same running state reads only appended bytes", () => {
+	const { cwd, cleanup } = withTranscripts(chain3, { a: [textLine("first-line")] });
+	const file = transcriptFileFor(transcriptDirFor(runsDir(cwd), "chain3", "r"), "a");
+	const open = mock.method(fsModule, "openSync");
+	const read = mock.method(fsModule, "readSync");
+	syncBuiltinESMExports();
+	try {
+		const state = finished3(cwd);
+		state.status = "running";
+		const initial = fs.statSync(file).size;
+		assert.match(renderRunResult(state, "", theme, true).render(100).join("\n"), /first-line/);
+		const appended = `${textLine("second-line")}\n`;
+		fs.appendFileSync(file, appended);
+		assert.match(renderRunResult(state, "", theme, true).render(100).join("\n"), /first-line[\s\S]*second-line/);
+		const fds = new Set(open.mock.calls.filter((c) => c.arguments[0] === file).map((c) => c.result));
+		// readSync(fd, buf, offset, length, position)
+		const reads = read.mock.calls
+			.map((c) => c.arguments as unknown[])
+			.filter((a) => fds.has(a[0] as number))
+			.map((a) => [a[3], a[4]]);
+		assert.deepEqual(reads, [[initial, 0], [Buffer.byteLength(appended), initial]]);
+	} finally {
+		open.mock.restore();
+		read.mock.restore();
+		syncBuiltinESMExports();
+		cleanup();
+	}
+});
+
+test("renderRunResult expanded: a running run picks up appended transcript lines", () => {
+	const { cwd, cleanup } = withTranscripts(chain3, { a: [textLine("first-line")] });
+	try {
+		const state = finished3(cwd);
+		state.status = "running";
+		const component = renderRunResult(state, "", theme, true);
+		assert.doesNotMatch(component.render(100).join("\n"), /second-line/);
+		fs.appendFileSync(transcriptFileFor(transcriptDirFor(runsDir(cwd), "chain3", "r"), "a"), `${textLine("second-line")}\n`);
+		assert.match(component.render(100).join("\n"), /second-line/);
+	} finally {
+		cleanup();
+	}
 });

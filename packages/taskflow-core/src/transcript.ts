@@ -7,35 +7,36 @@
  */
 
 import * as fs from "node:fs";
-import { summarizeToolCall } from "./runner-core.ts";
+import { normaliseClaude } from "./transcript/claude.ts";
+import { normaliseCodex } from "./transcript/codex.ts";
+import { normaliseGrok } from "./transcript/grok.ts";
+import { normaliseOpencode } from "./transcript/opencode.ts";
+import { normalisePi } from "./transcript/pi.ts";
+import type { Normaliser, TranscriptEntry } from "./transcript/types.ts";
 
-export interface TranscriptAttemptEntry {
-	type: "attempt";
-	attempt: number;
-	at?: number;
-}
-export interface TranscriptTextEntry {
-	type: "text";
-	role: string;
-	text: string;
-}
-export interface TranscriptToolCallEntry {
-	type: "tool_call";
-	name: string;
-	summary: string;
-	args: Record<string, unknown>;
-}
-export interface TranscriptToolResultEntry {
-	type: "tool_result";
-	name: string;
-	text: string;
-	isError: boolean;
-}
-export type TranscriptEntry =
-	| TranscriptAttemptEntry
-	| TranscriptTextEntry
-	| TranscriptToolCallEntry
-	| TranscriptToolResultEntry;
+export type {
+	Normaliser,
+	TranscriptAttemptEntry,
+	TranscriptEntry,
+	TranscriptTextEntry,
+	TranscriptThinkingEntry,
+	TranscriptToolCallEntry,
+	TranscriptToolResultEntry,
+} from "./transcript/types.ts";
+
+/** Host normalisers keyed by the header's `host`; unknown hosts fall back to pi. */
+const NORMALISERS: Record<string, Normaliser> = {
+	pi: normalisePi,
+	codex: normaliseCodex,
+	claude: normaliseClaude,
+	opencode: normaliseOpencode,
+	grok: normaliseGrok,
+};
+
+const firstLine = (s: string): string => {
+	const line = s.trim().split("\n", 1)[0] ?? "";
+	return line.length > 80 ? `${line.slice(0, 80)}\u2026` : line;
+};
 
 /** Render parsed entries as plain text (no theming/colour) — used by `peek`
  * and any other host-neutral consumer. UI-rich rendering (wrapping, dim
@@ -47,32 +48,65 @@ export function formatTranscript(entries: TranscriptEntry[]): string {
 				return `--- attempt ${e.attempt} ---`;
 			case "text":
 				return `[${e.role || "assistant"}] ${e.text}`;
+			case "thinking":
+				return `\u2234 thinking: ${firstLine(e.text)}`;
 			case "tool_call":
 				return `\u25b8 ${e.summary}`;
-			case "tool_result":
-				return `${e.isError ? "\u2717" : "\u2713"} ${e.name || "result"}: ${e.text}`;
+			case "tool_result": {
+				const duration = e.durationMs === undefined ? "" : ` \u00b7 ${(e.durationMs / 1000).toFixed(1)}s`;
+				return `${e.isError ? "\u2717" : "\u2713"} ${e.name || "result"}${duration}: ${e.text}`;
+			}
 		}
 	});
 	return blocks.join("\n\n");
 }
 
-/** Best-effort text extraction from a tool-result content part. Hosts vary in
- * whether the result lands in `text`, `output`, `result`, or a nested `content`
- * array (MCP-style `{type:"text",text}` blocks); this tries each in order. */
-function toolResultText(part: Record<string, unknown>): string {
-	if (typeof part.text === "string") return part.text;
-	if (typeof part.output === "string") return part.output;
-	if (typeof part.result === "string") return part.result;
-	const content = part.content;
-	if (Array.isArray(content)) {
-		return content
-			.map((c) => (c && typeof c === "object" && typeof (c as { text?: unknown }).text === "string" ? (c as { text: string }).text : ""))
-			.filter(Boolean)
-			.join("\n");
+/**
+ * Stateful line parser for one transcript file. A
+ * `{"type":"taskflow_transcript","host":...}` header selects the host
+ * normaliser for the lines after it (the tee writes one per attempt, after
+ * the runtime's `taskflow_attempt` marker); a headerless file is pi.
+ * Normaliser state (e.g. pi tool timing) persists across `push` calls so an
+ * incremental reader sees the same entries as a one-shot parse, and is reset
+ * on every header so nothing left open by one attempt leaks into the next.
+ */
+class TranscriptParser {
+	private normalise: Normaliser = normalisePi;
+	private state: object = {};
+
+	/** Parse `text` line by line; a line that is not valid JSON (e.g. a
+	 * partial trailing line read mid-write) is skipped, never thrown on. */
+	push(text: string): TranscriptEntry[] {
+		const entries: TranscriptEntry[] = [];
+		for (const line of text.split("\n")) {
+			if (!line.trim()) continue;
+			let event: unknown;
+			try {
+				event = JSON.parse(line);
+			} catch {
+				continue;
+			}
+			if (!event || typeof event !== "object") continue;
+			const e = event as Record<string, unknown>;
+			if (e.type === "taskflow_transcript") {
+				const host = typeof e.host === "string" ? e.host : "pi";
+				this.normalise = NORMALISERS[host] ?? normalisePi;
+				this.state = {};
+				continue;
+			}
+			if (e.type === "taskflow_attempt") {
+				const attempt = Number(e.attempt);
+				entries.push({
+					type: "attempt",
+					attempt: Number.isFinite(attempt) ? attempt : 0,
+					at: typeof e.at === "number" ? e.at : undefined,
+				});
+				continue;
+			}
+			entries.push(...this.normalise(e, this.state));
+		}
+		return entries;
 	}
-	const fallback = part.result ?? part.output ?? "";
-	if (!fallback) return "";
-	try { return JSON.stringify(fallback); } catch { return String(fallback); }
 }
 
 /**
@@ -82,46 +116,7 @@ function toolResultText(part: Record<string, unknown>): string {
  * occurs in the file — matching `foldEventLine`'s tolerance of noise.
  */
 export function parseTranscript(text: string): TranscriptEntry[] {
-	const entries: TranscriptEntry[] = [];
-	for (const line of text.split("\n")) {
-		if (!line.trim()) continue;
-		let event: unknown;
-		try {
-			event = JSON.parse(line);
-		} catch {
-			continue;
-		}
-		if (!event || typeof event !== "object") continue;
-		const e = event as Record<string, unknown>;
-		if (e.type === "taskflow_attempt") {
-			const attempt = Number(e.attempt);
-			entries.push({
-				type: "attempt",
-				attempt: Number.isFinite(attempt) ? attempt : 0,
-				at: typeof e.at === "number" ? e.at : undefined,
-			});
-			continue;
-		}
-		if (e.type !== "message_end" || !e.message || typeof e.message !== "object") continue;
-		const message = e.message as Record<string, unknown>;
-		const role = typeof message.role === "string" ? message.role : "";
-		const content = Array.isArray(message.content) ? message.content : [];
-		for (const rawPart of content) {
-			if (!rawPart || typeof rawPart !== "object") continue;
-			const part = rawPart as Record<string, unknown>;
-			if (part.type === "text" && typeof part.text === "string" && part.text.trim()) {
-				entries.push({ type: "text", role, text: part.text });
-			} else if (part.type === "toolCall") {
-				const name = typeof part.name === "string" ? part.name : "";
-				const args = (part.arguments && typeof part.arguments === "object" ? part.arguments : {}) as Record<string, unknown>;
-				entries.push({ type: "tool_call", name, summary: summarizeToolCall(name, args), args });
-			} else if (part.type === "toolResult") {
-				const name = typeof part.name === "string" ? part.name : "";
-				entries.push({ type: "tool_result", name, text: toolResultText(part), isError: Boolean(part.isError) });
-			}
-		}
-	}
-	return entries;
+	return new TranscriptParser().push(text);
 }
 
 /**
@@ -134,6 +129,7 @@ export function parseTranscript(text: string): TranscriptEntry[] {
 export class TranscriptTail {
 	private accumulated: TranscriptEntry[] = [];
 	private offset = 0;
+	private parser = new TranscriptParser();
 	readonly file: string;
 
 	constructor(file: string) {
@@ -156,6 +152,7 @@ export class TranscriptTail {
 			// File was replaced/truncated — start over.
 			this.offset = 0;
 			this.accumulated = [];
+			this.parser = new TranscriptParser();
 		}
 		if (size <= this.offset) return false;
 		let text: string;
@@ -175,7 +172,7 @@ export class TranscriptTail {
 		if (cut < 0) return false;
 		const complete = text.slice(0, cut + 1);
 		this.offset += Buffer.byteLength(complete);
-		const added = parseTranscript(complete);
+		const added = this.parser.push(complete);
 		if (!added.length) return false;
 		this.accumulated = this.accumulated.concat(added);
 		return true;

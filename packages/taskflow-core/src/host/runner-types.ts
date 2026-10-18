@@ -88,6 +88,10 @@ export interface LiveUpdate {
 	text: string;
 	usage: UsageStats;
 	model?: string;
+	/** Tail of assistant text still being streamed (not a finished turn): the
+	 *  runtime shows it as `liveText` but keeps it out of `liveLog` and does not
+	 *  signal progress for it. */
+	streaming?: boolean;
 }
 
 /** Per-run knobs the engine passes to whichever host runner executes the task. */
@@ -123,10 +127,12 @@ export interface RunOptions {
 	 */
 	steerFile?: string;
 	/**
-	 * Transcript recording (opt-in). When set, the host should append this
-	 * node's raw output lines (and runtime-emitted markers, e.g. retry attempt
-	 * boundaries) to this file. A host without that capability ignores it
-	 * (fail-open: transcript capture is simply unavailable).
+	 * Transcript recording (opt-in). When set, the host appends this node's raw
+	 * output lines to this file behind a `taskflow_transcript` header naming its
+	 * event format — every `runSubagentProcess` host (pi, codex, claude, opencode,
+	 * grok) forwards it as `transcriptFile` + `transcriptHost`. The runtime adds
+	 * its own markers (retry attempt boundaries). Fail-open: an unwritable path
+	 * only disables capture.
 	 */
 	transcriptFile?: string;
 	/**

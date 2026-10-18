@@ -345,6 +345,8 @@ export async function runOpencodeAgentTask(
 		idleTimeoutMs: opts.idleTimeoutMs,
 		signal: opts.signal,
 		onLive: opts.onLive,
+		transcriptFile: opts.transcriptFile,
+		transcriptHost: "opencode",
 		acc: newOpencodeAccumulator(model),
 		foldLine: foldOpencodeEventLine,
 		requireTerminalEvent: true,

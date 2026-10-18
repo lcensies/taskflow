@@ -390,7 +390,11 @@ export class InspectorComponent {
 		// its own section of the merged output; else today's in-memory block.
 		const entries = this.tail?.entries ?? [];
 		const body = entries.length
-			? renderTranscript(entries, Math.max(10, width), th, { full: this.full })
+			? renderTranscript(entries, Math.max(10, width), th, {
+					full: this.full,
+					expanded: this.full,
+					cwd: this.state.cwd,
+				})
 			: (this.itemBody(ps) ?? this.fallbackBody(ps));
 		// Leave room for the header already emitted plus the panel chrome
 		// (top border, footer separator, hint, bottom border).

@@ -222,3 +222,74 @@ test("liveLog: bounded, ordered, and free of consecutive duplicates", async () =
 		fs.rmSync(cwd, { recursive: true, force: true });
 	}
 });
+
+test("liveLog: streaming updates set liveText only and signal no progress; the turn update lands once", async () => {
+	const cwd = tmpDir();
+	try {
+		const def: Taskflow = {
+			name: "f",
+			phases: [
+				{ id: "p", agent: "a", task: "t" },
+				{ id: "fan", type: "parallel", branches: [{ agent: "a", task: "b" }], dependsOn: ["p"] },
+			],
+		};
+		const state = mkState(def, cwd);
+		let progress = 0;
+		await executeTaskflow(state, {
+			cwd,
+			agents: AGENTS,
+			onProgress: () => { progress++; },
+			runTask: async (_c, _a, agentName, task, o: RunOptions): Promise<RunResult> => {
+				const id = task === "t" ? "p" : "fan";
+				const before = { log: [...(state.phases[id].liveLog ?? [])], progress };
+				for (const text of ["Hel", "Hello", "Hello world"]) o.onLive?.({ text, usage: emptyUsage(), streaming: true });
+				assert.equal(state.phases[id].liveText, "Hello world");
+				assert.deepEqual(state.phases[id].liveLog ?? [], before.log, `${id}: streaming must not touch liveLog`);
+				assert.equal(progress, before.progress, `${id}: streaming must not signal progress`);
+				o.onLive?.({ text: "Hello world!", usage: emptyUsage() });
+				assert.equal(state.phases[id].liveText, "Hello world!");
+				assert.deepEqual(state.phases[id].liveLog, [...before.log, "Hello world!"]);
+				return { agent: agentName, task, exitCode: 0, output: "ok", stderr: "", usage: emptyUsage(), stopReason: "end" };
+			},
+		});
+		assert.equal(state.status, "completed");
+	} finally {
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("liveLog: a fan-out item's streamed tail is not logged when a sibling finishes", async () => {
+	const cwd = tmpDir();
+	try {
+		const def: Taskflow = {
+			name: "f",
+			phases: [{ id: "fan", type: "parallel", branches: [{ agent: "a", task: "s" }, { agent: "a", task: "q" }] }],
+		};
+		const state = mkState(def, cwd);
+		let streamed!: () => void;
+		const didStream = new Promise<void>((r) => (streamed = r));
+		await executeTaskflow(state, {
+			cwd,
+			agents: AGENTS,
+			runTask: async (_c, _a, agentName, task, o: RunOptions): Promise<RunResult> => {
+				const ok = (output: string): RunResult => ({ agent: agentName, task, exitCode: 0, output, stderr: "", usage: emptyUsage(), stopReason: "end" });
+				if (task === "q") {
+					await didStream; // finish (and refresh the phase) while the sibling is mid-stream
+					return ok("quick");
+				}
+				o.onLive?.({ text: "partial stream", usage: emptyUsage(), streaming: true });
+				streamed();
+				await new Promise((r) => setTimeout(r, 20));
+				assert.equal(state.phases.fan.items?.[1]?.status, "done");
+				o.onLive?.({ text: "turn done", usage: emptyUsage() });
+				return ok("slow");
+			},
+		});
+		assert.equal(state.status, "completed");
+		const log = state.phases.fan.liveLog ?? [];
+		assert.ok(!log.some((l) => l.includes("partial")), `streamed tail leaked into liveLog: ${JSON.stringify(log)}`);
+		assert.deepEqual(log, ["turn done"]);
+	} finally {
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});

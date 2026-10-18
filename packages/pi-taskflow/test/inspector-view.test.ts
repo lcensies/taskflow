@@ -641,3 +641,43 @@ test("inspector: setState adopts a newer copy and keeps the cursor", () => {
 	assert.match(lines.find((l) => l.includes("❯"))!, /polish/, "cursor must not jump on refresh");
 	view.dispose();
 });
+
+test("inspector detail: an edit transcript renders pi's diff rows", async () => {
+	const { initTheme } = await import("@earendil-works/pi-coding-agent");
+	initTheme("dark"); // pi's diff renderer styles through pi's global theme
+	const styled: any = { ...theme, bg: (_c: string, s: string) => s, inverse: (s: string) => s };
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tf-inspector-"));
+	try {
+		const file = path.join(dir, "p.ndjson");
+		const edit = { path: "src/a.ts", edits: [{ oldText: "const before = 1;", newText: "const after = 2;" }] };
+		fs.writeFileSync(
+			file,
+			messageEnd("assistant", [{ type: "toolCall", id: "c1", name: "edit", arguments: edit }]) +
+				`${JSON.stringify({
+					type: "message_end",
+					message: {
+						role: "toolResult",
+						toolCallId: "c1",
+						toolName: "edit",
+						content: [{ type: "text", text: "Successfully replaced 1 block(s) in src/a.ts." }],
+						details: { diff: "-1 const before = 1;\n+1 const after = 2;", firstChangedLine: 1 },
+						isError: false,
+					},
+				})}\n`,
+		);
+		const state = mkRun({ p: { id: "p", status: "done" } }, ["p"]);
+		const view = new InspectorComponent(state, styled, () => {}, true, undefined, () => 30, () => file);
+		view.handleInput("\r");
+		try {
+			const rows = view.render(80).map((l) => l.replace(/\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, ""));
+			assert.ok(rows.some((l) => /-1 const before = 1;/.test(l)), rows.join("\n"));
+			assert.ok(rows.some((l) => /\+1 const after = 2;/.test(l)), rows.join("\n"));
+			assert.ok(!rows.some((l) => l.includes("Successfully replaced")), "the diff replaces the raw result text");
+			for (const l of view.render(80)) assert.ok(visibleWidth(l) <= 80, `too wide: ${l}`);
+		} finally {
+			view.dispose();
+		}
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});

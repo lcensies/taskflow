@@ -428,6 +428,8 @@ export async function runGrokAgentTask(
 		idleTimeoutMs: opts.idleTimeoutMs,
 		signal: opts.signal,
 		onLive: opts.onLive,
+		transcriptFile: opts.transcriptFile,
+		transcriptHost: "grok",
 		acc: newGrokAccumulator(model),
 		foldLine: foldGrokEventLine,
 		requireTerminalEvent: true,
