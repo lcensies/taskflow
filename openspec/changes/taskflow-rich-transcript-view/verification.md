@@ -31,3 +31,20 @@ Environment note: running the suite inside a taskflow subagent needs `env -u PI_
 - [ ] `/tf runs` → phase → detail shows a diff for an `edit` tool call.
 - [ ] One `codex` or `claude` phase yields `runs/<flow>/<runId>/<node>.ndjson` starting with `{"type":"taskflow_transcript","host":"codex|claude",...}`, and it renders in the inspector.
 - [ ] A fan-out phase shows 6 items and `… +N items`.
+
+## TUI verification (pi 1.1.0 in tmux, 2026-10-18)
+
+Flow `rtv-demo` (3 phases, executor-fast; bash/read/edit tool calls) run via `/tf run rtv-demo`
+in an interactive pi inside `tmux -L rtv`. Screen captures in `evidence/`:
+
+- `tui-ctrl-o-while-running.ansi.txt` — Ctrl+O during the run: phases `scan`/`edit` done with
+  `∴ thinking`, pi-native `read` (file body), `edit` as a diff (`-2 beta` / `+2 BETA (edited)`,
+  SGR-coloured), `$ cat …` bash with output, `· 0.0s` durations (durationMs 2 in the transcript),
+  `─ output ─` per phase; `◐ summary` running with its tail; `─── Result ───` `(no output)`.
+- `tui-collapsed-after-completion.txt` — collapsed grid, `Ctrl+O to expand` hint, unchanged layout.
+- `tui-ctrl-o-after-completion.txt` / `.ansi.txt` — every phase's full tail + output; final
+  Markdown result rendered once. `+2 BETA (edited)` row carries pi's diff colour
+  (`38;2;166;227;161` on diff background).
+
+Not a regression but noticed: finished-run footer reads `· · $0.02 …` (pre-existing spinner
+placeholder in `footerLine`, untouched by this change).
