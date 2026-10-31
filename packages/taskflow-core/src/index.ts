@@ -32,7 +32,9 @@ export * from "./detached-control.ts";
 // its native backend/API contract is complete; publishing it from the root
 // barrel would accidentally freeze experimental lease/journal/sandbox types.
 export {
+	formatWorkspaceReconciliation,
 	reconcileResolveOnlyWorkspace,
+	type WorkspaceReconciliationResult,
 	WORKSPACE_RECONCILE_ACKNOWLEDGEMENT,
 	WORKSPACE_RECONCILE_MODE_ENV,
 	workspaceReconcileAllowedFromEnv,

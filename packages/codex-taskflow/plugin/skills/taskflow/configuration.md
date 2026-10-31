@@ -247,6 +247,16 @@ The direct Pi slash command is already a user control-plane action and does not
 require that environment variable. Reconciliation accepts the current state and
 advances its generation; it does not restore files or certify them as correct.
 
+The same acknowledged reconciliation is the recovery for
+`TFWS_MUTEX_IDENTITY: queue anchor is missing or invalid`, which a
+control-plane `*.lock.queue` left without its `.identity` anchor (for example by
+a pre-1.0 Taskflow writer) causes on every run. Normal runs never repair it.
+Reconciliation refuses, changing nothing, while a live process still owns any
+such queue. Otherwise it removes an empty orphaned queue, moves an orphan with
+leftover records aside as `<name>.preserved-<timestamp>-<id>`, and reports each
+mutex namespace it inspected. Stop any older Taskflow host on that workspace
+first, since an idle pre-anchor writer holds no record it could detect.
+
 **Passing args:**
 
 Via the MCP tool: `taskflow_run` with `{ "name": "audit-endpoints", "args": { "dir": "packages/api" } }`.

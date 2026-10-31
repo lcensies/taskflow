@@ -6,6 +6,7 @@ export * from "./execution.ts";
 export * from "./baseline.ts";
 export * from "./journal.ts";
 export * from "./leases.ts";
+export * from "./mutex-repair.ts";
 export * from "./permits.ts";
 export * from "./registry.ts";
 export * from "./resolve.ts";

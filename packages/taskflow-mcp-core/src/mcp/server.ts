@@ -84,6 +84,7 @@ import {
 	upgradeTraceEvent,
 	type ReplayReport,
 	type ReplayOverrides,
+	formatWorkspaceReconciliation,
 	reconcileResolveOnlyWorkspace,
 	clearDetachedCancelRequest,
 	DETACHED_CONTROL_VERSION,
@@ -1299,12 +1300,7 @@ export function makeToolHandlers(
 					reason: typeof args.reason === "string" ? args.reason : undefined,
 					signal: context?.signal,
 				});
-				const changed = result.reconciledIntentIds.length;
-				return textContent(
-					changed === 0
-						? `Workspace is already clean at generation ${result.generation}; no dirty intent was changed.`
-						: `Workspace reconciled: ${changed} dirty intent(s) accepted; generation ${result.previousGeneration} → ${result.generation}.`,
-				);
+				return textContent(formatWorkspaceReconciliation(result));
 			} catch (error) {
 				return textContent(
 					`Workspace reconciliation failed: ${error instanceof Error ? error.message : String(error)}`,

@@ -120,6 +120,7 @@ import {
 	type ResumeOverrides,
 	cwdBridgeModeFromEnv,
 	directoryIdentity,
+	formatWorkspaceReconciliation,
 	reconcileResolveOnlyWorkspace,
 	WORKSPACE_RECONCILE_ACKNOWLEDGEMENT,
 	workspaceReconcileAllowedFromEnv,
@@ -1233,10 +1234,7 @@ export default function (pi: ExtensionAPI) {
 						reason: params.reason,
 						signal,
 					});
-					const changed = result.reconciledIntentIds.length;
-					const text = changed === 0
-						? `Workspace is already clean at generation ${result.generation}; no dirty intent was changed.`
-						: `Workspace reconciled: ${changed} dirty intent(s) accepted; generation ${result.previousGeneration} → ${result.generation}.`;
+					const text = formatWorkspaceReconciliation(result);
 					return { content: [{ type: "text", text }], details: { action } satisfies TaskflowDetails };
 				} catch (error) {
 					return errorResult(action, `Workspace reconciliation failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -2112,12 +2110,7 @@ export default function (pi: ExtensionAPI) {
 						acknowledgement: WORKSPACE_RECONCILE_ACKNOWLEDGEMENT,
 						reason,
 					});
-					ctx.ui.notify(
-						result.reconciledIntentIds.length === 0
-							? `Workspace is already clean at generation ${result.generation}.`
-							: `Workspace reconciled: ${result.reconciledIntentIds.length} dirty intent(s); generation ${result.previousGeneration} → ${result.generation}.`,
-						"info",
-					);
+					ctx.ui.notify(formatWorkspaceReconciliation(result), "info");
 				} catch (error) {
 					ctx.ui.notify(`Workspace reconciliation failed: ${error instanceof Error ? error.message : String(error)}`, "error");
 				}

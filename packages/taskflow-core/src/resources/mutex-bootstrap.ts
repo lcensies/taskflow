@@ -62,6 +62,11 @@ function publish(file: string, value: unknown, syncDirectory: (directory: string
 	} finally { fs.unlinkSync(temp); }
 }
 
+/** Sibling evidence files of one mutex namespace, shared with the operator repair path. */
+export function mutexNamespacePaths(queue: string): { anchor: string; journal: string; completed: string } {
+	return { anchor: `${queue}.identity`, journal: `${queue}.initializing`, completed: `${queue}.initialized` };
+}
+
 export function bindMutexQueue(
 	queue: string,
 	owner: BootstrapOwner,
@@ -71,9 +76,7 @@ export function bindMutexQueue(
 	const parentPath = path.dirname(queue);
 	fs.mkdirSync(parentPath, { recursive: true });
 	const parent = directoryIdentity(parentPath);
-	const anchor = `${queue}.identity`;
-	const journal = `${queue}.initializing`;
-	const completed = `${queue}.initialized`;
+	const { anchor, journal, completed } = mutexNamespacePaths(queue);
 	let ownToken: string | undefined;
 
 	// Compatibility for already anchored namespaces from the preceding mutex

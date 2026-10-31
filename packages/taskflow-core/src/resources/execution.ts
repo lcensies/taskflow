@@ -26,6 +26,7 @@ import {
 } from "./journal.ts";
 import { PersistentLeaseCoordinator, type LeaseHandle } from "./leases.ts";
 import { createHostRootGrant, createRootRegistry, type RootGrant, type RootRegistry } from "./registry.ts";
+import { repairOrphanedMutexNamespaces, type MutexNamespaceRepair } from "./mutex-repair.ts";
 import { resolvePathRef, type ResolvedPathRef } from "./resolve.ts";
 import {
 	garbageCollectResourceFileTransactions,
@@ -114,6 +115,34 @@ export interface ReconcileResolveOnlyWorkspaceInput {
 	acknowledgement: string;
 	reason?: string;
 	signal?: AbortSignal;
+}
+
+export interface WorkspaceReconciliationResult extends ReconciliationResult {
+	/** Control-plane mutex namespaces inspected before the session was opened. */
+	mutexRepairs: MutexNamespaceRepair[];
+}
+
+function assertReconcileAuthorized(allowReconcile: boolean, acknowledgement: string): void {
+	if (!allowReconcile) {
+		throw new Error("TFWS_RECONCILE_NOT_AUTHORIZED: reconciliation requires an explicit trusted host decision");
+	}
+	if (acknowledgement !== WORKSPACE_RECONCILE_ACKNOWLEDGEMENT) {
+		throw new Error(
+			`TFWS_RECONCILE_ACK_REQUIRED: acknowledgement must exactly equal '${WORKSPACE_RECONCILE_ACKNOWLEDGEMENT}'`,
+		);
+	}
+}
+
+export function formatWorkspaceReconciliation(result: WorkspaceReconciliationResult): string {
+	const changed = result.reconciledIntentIds.length;
+	const lines = [changed === 0
+		? `Workspace is already clean at generation ${result.generation}; no dirty intent was changed.`
+		: `Workspace reconciled: ${changed} dirty intent(s) accepted; generation ${result.previousGeneration} → ${result.generation}.`];
+	for (const repair of result.mutexRepairs) {
+		lines.push(`Mutex ${repair.action}: ${repair.queue} — ${repair.detail}`);
+		for (const moved of repair.preserved) lines.push(`  preserved ${moved.from} → ${moved.to}`);
+	}
+	return lines.join("\n");
 }
 
 export interface ResolveOnlyWorkspaceSession {
@@ -295,7 +324,7 @@ class ResolveOnlyWorkspaceSessionImpl implements ResolveOnlyWorkspaceSession {
 	readonly #rootIdentity: DirectoryIdentity;
 	readonly #pendingLeaseReleases = new Set<LeaseHandle>();
 	readonly #allowReconcile: boolean;
-	readonly #controlDirectory: string;
+	readonly controlDirectory: string;
 	// A single resolve-only session can fan out many tasks over the same granted
 	// root. They are all potential writers and cannot safely overlap without a
 	// native broker/snapshot backend. Serialize them before lease acquisition so
@@ -328,7 +357,7 @@ class ResolveOnlyWorkspaceSessionImpl implements ResolveOnlyWorkspaceSession {
 		const controlDirectory = options.controlDirectory ?? defaultWorkspaceControlDirectory(this.invocationRoot);
 		ensurePrivateDirectory(controlDirectory);
 		const canonicalControlDirectory = fs.realpathSync(controlDirectory);
-		this.#controlDirectory = canonicalControlDirectory;
+		this.controlDirectory = canonicalControlDirectory;
 		if (isWithin(this.invocationRoot, canonicalControlDirectory) || isWithin(canonicalControlDirectory, this.invocationRoot)) {
 			throw new Error("TFWS_INVALID_POLICY: control-plane storage must not overlap the flow workspace grant");
 		}
@@ -365,14 +394,14 @@ class ResolveOnlyWorkspaceSessionImpl implements ResolveOnlyWorkspaceSession {
 				return active.some((lease) => sameExecutionOwner(lease.owner, owner));
 			},
 			recoverKnownClean: (intent) => recoverResourceFileIntent({
-				controlDirectory: this.#controlDirectory,
+				controlDirectory: this.controlDirectory,
 				intent,
 				leases: this.#leases,
 				leaseTimeoutMs: this.#leaseTimeoutMs,
 				signal: this.#signal,
 			}),
 		});
-		garbageCollectResourceFileTransactions(this.#controlDirectory, await this.#journal.listIntents());
+		garbageCollectResourceFileTransactions(this.controlDirectory, await this.#journal.listIntents());
 	}
 
 	async bindPhase(input: BindResolveOnlyPhaseInput): Promise<ResolveOnlyPhaseBinding> {
@@ -390,14 +419,7 @@ class ResolveOnlyWorkspaceSessionImpl implements ResolveOnlyWorkspaceSession {
 	}
 
 	async reconcile(input: ReconcileResolveOnlyWorkspaceInput): Promise<ReconciliationResult> {
-		if (!this.#allowReconcile) {
-			throw new Error("TFWS_RECONCILE_NOT_AUTHORIZED: reconciliation requires an explicit trusted host decision");
-		}
-		if (input.acknowledgement !== WORKSPACE_RECONCILE_ACKNOWLEDGEMENT) {
-			throw new Error(
-				`TFWS_RECONCILE_ACK_REQUIRED: acknowledgement must exactly equal '${WORKSPACE_RECONCILE_ACKNOWLEDGEMENT}'`,
-			);
-		}
+		assertReconcileAuthorized(this.#allowReconcile, input.acknowledgement);
 		await this.#drainPendingLeaseReleases();
 		this.#assertRootIdentity();
 		const owner: ExecutionOwner = {
@@ -550,7 +572,7 @@ class ResolveOnlyWorkspaceSessionImpl implements ResolveOnlyWorkspaceSession {
 			? AbortSignal.any([this.#signal, signal])
 			: this.#signal ?? signal;
 		return prepareResourceFileTransaction({
-			controlDirectory: this.#controlDirectory,
+			controlDirectory: this.controlDirectory,
 			resourceDomainId: this.#grant.resourceDomainId,
 			owner,
 			targets: resolvedTargets,
@@ -846,7 +868,13 @@ export async function createResolveOnlyWorkspaceSession(
 export async function reconcileResolveOnlyWorkspace(
 	options: ResolveOnlyWorkspaceSessionOptions,
 	input: ReconcileResolveOnlyWorkspaceInput,
-): Promise<ReconciliationResult> {
-	const session = await createResolveOnlyWorkspaceSession(options);
-	return session.reconcile(input);
+): Promise<WorkspaceReconciliationResult> {
+	assertReconcileAuthorized(options.allowReconcile === true, input.acknowledgement);
+	// Construction validates root and control-plane storage without touching any
+	// mutex. Orphaned namespaces must be repaired before initialize() acquires
+	// them; only this acknowledged path may do so, never normal bootstrap.
+	const session = new ResolveOnlyWorkspaceSessionImpl(options);
+	const mutexRepairs = repairOrphanedMutexNamespaces(session.controlDirectory);
+	await session.initialize();
+	return { ...(await session.reconcile(input)), mutexRepairs };
 }
