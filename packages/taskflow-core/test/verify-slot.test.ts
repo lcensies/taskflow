@@ -31,6 +31,9 @@ test("verify omitted + impl agents: canonical tail appended, wired to terminals"
 	assert.deepEqual(p[I.fixHarness].dependsOn, ["b", "c"]);
 	assert.ok(!p[I.build], "no test command -> no build phase");
 	assert.deepEqual(p[I.operator].dependsOn, [I.fix, I.fixHarness]);
+	assert.equal(p[I.fixHarness].agent, "harness-engineer");
+	assert.match(p[I.fixHarness].task!, /No harness is wired.*bootstrap.*brownfield/, "no harness -> bootstrap/brownfield mode");
+	assert.match(p[I.operator].task!, new RegExp(`\\{steps\\.${I.fixHarness}\\.output\\}`), "operator sees the harness report");
 	for (const lens of ["spec-review", "risk-review", "security-review", "quality-review"]) {
 		assert.deepEqual(p[lens].dependsOn, [I.fix, I.fixHarness], lens);
 		assert.equal(p[lens].output, "json");
@@ -62,6 +65,8 @@ test("verify object: testCmd adds build; harness/replay/redteam add their phases
 	assert.match(String(p[I.build].run), /just test.*BUILD_OK/);
 	assert.deepEqual(p[I.harnessUp].dependsOn, [I.build]);
 	assert.deepEqual(p[I.operator].dependsOn, [I.harnessUp, I.replay]);
+	assert.match(p[I.fixHarness].task!, /Harness is wired.*NOOP/, "wired harness -> gap-close only");
+	assert.doesNotMatch(p[I.operator].task!, /steps\.fix-harness/);
 	assert.deepEqual(p[I.harnessDown].dependsOn, [I.operator, I.redteam]);
 	assert.equal(p[I.harnessDown].join, "any");
 	assert.deepEqual(p["spec-review"].dependsOn, [I.harnessDown]);

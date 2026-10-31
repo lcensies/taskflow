@@ -63,7 +63,7 @@ export const VERIFY_TAIL_IDS = {
 } as const;
 
 const FIXER_AGENT = "executor-expert";
-const HARNESS_FIXER_AGENT = "executor-fast";
+const HARNESS_AGENT = "harness-engineer";
 const OPERATOR_AGENT = "blackbox-operator";
 const REDTEAM_AGENT = "edge-func-checker";
 const ARBITER_AGENT = "final-arbiter";
@@ -183,16 +183,23 @@ export function canonicalVerifyTail(terminals: string[], implPhases: Phase[], o:
 		{
 			id: I.fixHarness,
 			type: "agent",
-			agent: HARNESS_FIXER_AGENT,
+			agent: HARNESS_AGENT,
 			dependsOn: [...terminals],
 			optional: true,
-			task:
-				`Read ${findings} if it exists. If it has no 'Unverifiable' section, reply ` +
-				"NOOP. Otherwise close each listed harness gap by extending tests/harness/ " +
-				"(fakes, harness.py methods, compose overrides, README) and, when the gap " +
-				"was 'no test', adding the pytest to tests/e2e/. Additive only: never change " +
-				"an existing method or test's signature/semantics. Do not touch application " +
-				"source. Report the files you changed.",
+			task: harness
+				? `Harness is wired (up/down scripts exist). Read ${findings} if it exists. If it has no ` +
+					"'Unverifiable' section, reply NOOP. Otherwise close each listed harness gap per your " +
+					"gap-close mode (additive only; never touch application source). Report the files you changed."
+				: "No harness is wired for this flow (verify.harnessUp/harnessDown unset). Pick your mode from " +
+					"what is on disk: bootstrap (greenfield - discover use cases, build every test layer separately: " +
+					"static, unit, scenario/e2e harness with up/down/replay + Harness helper + fakes, regression " +
+					"replay, black-box operator entry, browser automation when there is a UI, one full-suite " +
+					"command) or brownfield (wrap the existing runners, CI and AGENTS.md into the contract without " +
+					"changing existing tests). In both modes write tests/harness/README.md (one 'we run X this way' " +
+					"section per layer) and the AGENTS.md '## Testing' section so later agents pick the harness up. " +
+					`Then, if ${findings} has an 'Unverifiable' section, close those gaps too. Never touch ` +
+					"application source. Report per your contract; the last section must list test.command and " +
+					"test.harness.{kind,up,down,replay} so they can be set with /facts set.",
 		},
 	];
 	const verdictDeps: string[] = [I.fix];
@@ -244,7 +251,9 @@ export function canonicalVerifyTail(terminals: string[], implPhases: Phase[], o:
 	}
 
 	// Operator is always present: with a harness it exercises the running
-	// system; without one it black-boxes the change through its public surface.
+	// system; without one it gets the fix-harness report (a harness built this
+	// run, or none) and black-boxes the change through its public surface.
+	if (!harness) operatorDeps = [...new Set([...operatorDeps, I.fixHarness])];
 	phases.push({
 		id: I.operator,
 		type: "agent",
@@ -264,8 +273,11 @@ export function canonicalVerifyTail(terminals: string[], implPhases: Phase[], o:
 			replayLine +
 			(harness
 				? "Black-box exercise the running system against the specs and tasks in context. "
-				: "No harness is wired: black-box the change through its public surface only (CLI, " +
-					"tests, API, built artifact) against the specs/tasks in context and the brief below. ") +
+				: `No harness was wired for this flow. Harness report from this run:\n{steps.${I.fixHarness}.output}\n\n` +
+					"If it names up/down/replay scripts, run them yourself via subprocess (up first, read its last " +
+					"JSON line, replay, then down before you answer) and exercise the running system; otherwise " +
+					"black-box the change through its public surface only (CLI, tests, API, built artifact) " +
+					"against the specs/tasks in context and the brief below. ") +
 			brief +
 			"Reading implementation source is forbidden. A build/launch " +
 			"failure is itself a finding. Derive scenarios from every `#### Scenario` (or from the " +
