@@ -812,7 +812,8 @@ Built-in agents: `executor`, `executor-code` (complex, multi-file),
 `executor-fast` (trivial), `executor-ui`, `scout` (cheap recon), `planner`,
 `analyst`, `critic`, `reviewer`, `risk-reviewer`, `security-reviewer`,
 `plan-arbiter`, `final-arbiter`, `test-engineer`, `doc-writer`, `verifier`,
-`recover`, `visual-explorer`. **Do not invent agent names** — omit `agent` to
+`recover`, `visual-explorer`, `harness-engineer` (test harness). **Do not
+invent agent names** — omit `agent` to
 use the default. Use cheap agents (`scout`) for discovery and strong agents
 (`critic`, `final-arbiter`) for gates/judging.
 <!-- /host:codex,claude,opencode,grok,hermes -->
