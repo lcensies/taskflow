@@ -150,8 +150,17 @@ test("probe collector honors the Hermes binary override without claiming sandbox
 		const body = '#!/bin/sh\nprintf "hermes-probe-fixture 1.0\\n"\n';
 		fs.writeFileSync(binary, body, { mode: 0o755 });
 		const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+		// The probe shells out to OS tools, so a restricted PATH must still contain
+		// the directories that really hold them on this machine — /usr/bin:/bin is
+		// empty on NixOS. Directories carrying a `hermes` binary are dropped so the
+		// override stays the only thing that can identify the host.
+		const osTool = process.platform === "darwin" ? "sw_vers" : "uname";
+		const toolPath = (process.env.PATH ?? "")
+			.split(path.delimiter)
+			.filter((dir) => dir && fs.existsSync(path.join(dir, osTool)) && !fs.existsSync(path.join(dir, "hermes")))
+			.join(path.delimiter);
 		const proc = spawnSync(process.execPath, [path.join(repositoryRoot, "scripts/workspace-probes/run.mjs")], {
-			env: { ...process.env, PATH: "/usr/bin:/bin", PI_TASKFLOW_HERMES_BIN: binary },
+			env: { ...process.env, PATH: toolPath || "/usr/bin:/bin", PI_TASKFLOW_HERMES_BIN: binary },
 			encoding: "utf8",
 			timeout: 15_000,
 		});
